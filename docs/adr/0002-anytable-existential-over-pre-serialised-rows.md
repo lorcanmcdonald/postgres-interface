@@ -1,0 +1,3 @@
+# AnyTable uses an existential wrapper rather than pre-serialised rows
+
+`AnyTable` is defined as `forall a. Queryable a => AnyTable (Table a)` rather than erasing the row type at construction time into a plain record of `(Schema, QueryPlan -> IO (Stream [ColumnValue]))`. The pre-serialised approach is simpler but allows `schema` and the row-producing function to diverge — nothing stops a `Table` where the schema declares two columns but rows return three values. The existential keeps both tied to the same `Queryable` instance, making the inconsistent state unrepresentable. The existential is contained to the registration boundary; the rest of the server works with `[ColumnValue]` rows after unpacking it once.
