@@ -5,23 +5,23 @@ module Database.PostgresInterface.Protocol.Server
   ) where
 
 import Control.Exception (finally)
-import Data.Binary.Get (runGetOrFail)
-import Data.Binary.Put (putInt32be, runPut)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
-import Data.ByteString.Lazy qualified as BL
 import Database.PostgresInterface.Protocol.Catalog (handleCatalogQuery)
 import Database.PostgresInterface.Protocol.Decoder (decodeFrontendMessage, decodeStartup)
 import Database.PostgresInterface.Protocol.Encoder (encodeBackendMessage)
 import Database.PostgresInterface.Protocol.Messages
+import Database.PostgresInterface.Sql.Parse (parseSql)
+import Database.PostgresInterface.Sql.Plan (QueryError (..), QueryPlan (..), toQueryPlan)
+import Database.PostgresInterface.Table (AnyTable, findTable, executeTable)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
 
 -- | Handle a single client connection: startup handshake then message loop.
-runConnection :: Socket -> IO ()
-runConnection sock = handleConnection `finally` pure ()
+runConnection :: [AnyTable] -> Socket -> IO ()
+runConnection tables sock = handleConnection `finally` pure ()
   where
     handleConnection = do
       -- Read and handle startup message
@@ -34,7 +34,7 @@ runConnection sock = handleConnection `finally` pure ()
           mapM_ (sendAll sock . encodeBackendMessage) defaultParams
           sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
           -- Enter message loop
-          messageLoop sock
+          messageLoop tables sock
         Right _ ->
           sendError sock (internalError "unexpected message during startup")
 
@@ -59,8 +59,8 @@ isSslRequest bs =
   BS.length bs == 8 && readInt32BE (BS.drop 4 bs) == 80877103
 
 -- | Main message loop: read messages until Terminate or connection closed
-messageLoop :: Socket -> IO ()
-messageLoop sock = do
+messageLoop :: [AnyTable] -> Socket -> IO ()
+messageLoop tables sock = do
   -- All messages after startup: 1 type byte + 4 byte length
   headerBytes <- recvExact sock 5
   let msgLen = fromIntegral (readInt32BE (BS.drop 1 headerBytes)) :: Int
@@ -70,20 +70,43 @@ messageLoop sock = do
   case decodeFrontendMessage raw of
     Left err -> do
       sendError sock (internalError ("decode error: " <> err))
-      messageLoop sock
+      messageLoop tables sock
     Right Terminate -> pure ()
     Right (Query sql) -> do
       case handleCatalogQuery sql of
-        Just msgs -> do
+        Just msgs ->
           mapM_ (sendAll sock . encodeBackendMessage) msgs
-        Nothing -> do
-          -- Phase 9+ will dispatch to registered table handlers.
-          -- For now return an empty result so clients stay connected.
-          sendAll sock (encodeBackendMessage (CommandComplete "SELECT 0"))
+        Nothing ->
+          handleUserQuery tables sock sql
       sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
-      messageLoop sock
+      messageLoop tables sock
     Right msg ->
       sendError sock (internalError ("unexpected message: " <> show msg))
+
+handleUserQuery :: [AnyTable] -> Socket -> Text -> IO ()
+handleUserQuery tables sock sql =
+  case parseSql sql of
+    Left _ ->
+      sendError sock (PgError SeverityError "42601" ("syntax error: " <> sql))
+    Right ast ->
+      case toQueryPlan ast of
+        Left err ->
+          sendError sock (queryErrorToPgError err)
+        Right plan ->
+          case findTable (qpTable plan) tables of
+            Nothing ->
+              sendError sock (PgError SeverityError "42P01"
+                ("relation \"" <> qpTable plan <> "\" does not exist"))
+            Just tbl -> do
+              msgs <- executeTable tbl plan
+              mapM_ (sendAll sock . encodeBackendMessage) msgs
+
+queryErrorToPgError :: QueryError -> PgError
+queryErrorToPgError (UnsupportedOperation msg) = PgError SeverityError "0A000" msg
+queryErrorToPgError (UnknownTable name)         = PgError SeverityError "42P01" ("relation \"" <> name <> "\" does not exist")
+queryErrorToPgError (UnknownColumn name)        = PgError SeverityError "42703" ("column \"" <> name <> "\" does not exist")
+queryErrorToPgError (UnsupportedSyntax msg)     = PgError SeverityError "42601" msg
+queryErrorToPgError (InternalError msg)         = PgError SeverityError "XX000" msg
 
 -- | Receive exactly n bytes, blocking until available
 recvExact :: Socket -> Int -> IO ByteString

@@ -20,7 +20,7 @@ defaultConfig = ServerConfig { serverPort = 5432 }
 
 -- | Start a PostgreSQL-compatible server, accepting connections in a loop.
 servePostgres :: ServerConfig -> [AnyTable] -> IO ()
-servePostgres cfg _tables =
+servePostgres cfg tables =
   withSocketsDo $ do
     addr <- resolve (serverPort cfg)
     bracket (open addr) close acceptLoop
@@ -38,5 +38,5 @@ servePostgres cfg _tables =
 
     acceptLoop sock = do
       (conn, _peer) <- accept sock
-      _ <- forkIO (runConnection conn `finally` close conn)
+      _ <- forkIO (runConnection tables conn `finally` close conn)
       acceptLoop sock

@@ -6,6 +6,7 @@ import Protocol.IntegrationSpec qualified
 import Sql.PlanSpec qualified
 import QueryableSpec qualified
 import EndToEndSpec qualified
+import TableSpec qualified
 
 main :: IO ()
 main = defaultMain $ testGroup "postgres-interface"
@@ -14,4 +15,5 @@ main = defaultMain $ testGroup "postgres-interface"
   , Sql.PlanSpec.tests
   , QueryableSpec.tests
   , EndToEndSpec.tests
+  , TableSpec.tests
   ]
