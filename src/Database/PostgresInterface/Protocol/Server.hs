@@ -63,6 +63,12 @@ messageLoop :: [AnyTable] -> Socket -> IO ()
 messageLoop tables sock = do
   -- All messages after startup: 1 type byte + 4 byte length
   headerBytes <- recvExact sock 5
+  if BS.null headerBytes
+    then pure ()  -- client disconnected cleanly
+    else messageLoop' tables sock headerBytes
+
+messageLoop' :: [AnyTable] -> Socket -> ByteString -> IO ()
+messageLoop' tables sock headerBytes = do
   let msgLen = fromIntegral (readInt32BE (BS.drop 1 headerBytes)) :: Int
       payloadLen = msgLen - 4
   payload <- recvExact sock payloadLen
@@ -82,6 +88,7 @@ messageLoop tables sock = do
       messageLoop tables sock
     Right msg ->
       sendError sock (internalError ("unexpected message: " <> show msg))
+
 
 handleUserQuery :: [AnyTable] -> Socket -> Text -> IO ()
 handleUserQuery tables sock sql =
