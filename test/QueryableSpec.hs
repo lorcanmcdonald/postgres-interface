@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeApplications #-}
 
@@ -41,6 +42,9 @@ tests = testGroup "Queryable"
     , testCase "schema column types from Haskell types" testGenericSchemaTypes
     , testCase "toRow values match fields" testGenericToRow
     , testCase "schema and toRow lengths match" testGenericLengthInvariant
+    ]
+  , testGroup "DuplicateRecordFields"
+    [ testCase "schema uses plain field name not mangled selector" testDuplicateFieldNames
     ]
   ]
 
@@ -85,3 +89,18 @@ testGenericLengthInvariant :: Assertion
 testGenericLengthInvariant =
   let day = fromGregorian 2026 1 1
   in length (toRow (Event "x" 1 day)) @?= length (schema @Event)
+
+-- DuplicateRecordFields regression --------------------------------------------
+-- Both types have a 'date' field; GHC mangles selectors to $sel:date:TypeName.
+-- schema must return the plain name "date", not the mangled form.
+
+data Foo = Foo { date :: Day, label :: Text } deriving (Generic)
+data Bar = Bar { date :: Day, value :: Int32 } deriving (Generic)
+
+instance Queryable Foo
+instance Queryable Bar
+
+testDuplicateFieldNames :: Assertion
+testDuplicateFieldNames = do
+  map fst (schema @Foo) @?= ["date", "label"]
+  map fst (schema @Bar) @?= ["date", "value"]

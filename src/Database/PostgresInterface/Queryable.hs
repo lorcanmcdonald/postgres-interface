@@ -21,6 +21,7 @@ module Database.PostgresInterface.Queryable
 import Data.Int (Int32, Int64)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (Day)
 import GHC.Generics
 
@@ -69,8 +70,15 @@ instance GSchema f => GSchema (M1 C meta f) where
 instance (Selector s, GColumnType f) => GSchema (M1 S s f) where
   gSchema = [(fieldName', colType)]
     where
-      fieldName' = read (show (selName (undefined :: M1 S s f p)))
+      fieldName' = extractFieldLabel (selName (undefined :: M1 S s f p))
       colType    = gColumnType @f
+
+-- | Extract the source-level field name from a GHC.Generics selector name.
+-- With DuplicateRecordFields enabled, GHC mangles selectors to
+-- "$sel:fieldname:Constructor". This strips the mangling.
+extractFieldLabel :: String -> Text
+extractFieldLabel ('$':'s':'e':'l':':':rest) = T.pack (takeWhile (/= ':') rest)
+extractFieldLabel name                       = T.pack name
 
 instance (GSchema l, GSchema r) => GSchema (l :*: r) where
   gSchema = gSchema @l <> gSchema @r

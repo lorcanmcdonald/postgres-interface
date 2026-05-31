@@ -16,6 +16,11 @@ tests = testGroup "Sql.Plan"
     , testCase "rejects INSERT"             testRejectInsert
     , testCase "rejects UPDATE"             testRejectUpdate
     ]
+  , testGroup "parseSql reserved-word identifiers"
+    [ testCase "'date' unquoted in SELECT list"   testDateInSelect
+    , testCase "'date' unquoted in WHERE clause"  testDateInWhere
+    , testCase "'date' unquoted in ORDER BY"      testDateInOrderBy
+    ]
   , testGroup "toQueryPlan"
     [ testCase "SELECT * FROM t"                      testSelectStar
     , testCase "SELECT col FROM t"                    testSelectCol
@@ -38,6 +43,26 @@ runPlan sql = case parseSql sql of
   Right ast -> case toQueryPlan ast of
     Left err -> assertFailure ("plan error: " <> show err) >> undefined
     Right p  -> pure p
+
+-- reserved-word identifier tests ----------------------------------------------
+
+testDateInSelect :: Assertion
+testDateInSelect =
+  case parseSql "SELECT date, amount FROM line_items" of
+    Left err -> assertFailure ("parse failed: " <> err)
+    Right _  -> pure ()
+
+testDateInWhere :: Assertion
+testDateInWhere =
+  case parseSql "SELECT * FROM line_items WHERE date > '2026-01-01'" of
+    Left err -> assertFailure ("parse failed: " <> err)
+    Right _  -> pure ()
+
+testDateInOrderBy :: Assertion
+testDateInOrderBy =
+  case parseSql "SELECT * FROM line_items ORDER BY date DESC" of
+    Left err -> assertFailure ("parse failed: " <> err)
+    Right _  -> pure ()
 
 -- parseSql tests --------------------------------------------------------------
 
