@@ -43,15 +43,18 @@ runConnection tables sock = handleConnection `finally` pure ()
 recvStartup :: Socket -> IO ByteString
 recvStartup sock = do
   lenBytes <- recvExact sock 4
-  let totalLen = fromIntegral (readInt32BE lenBytes) :: Int
-  rest <- recvExact sock (totalLen - 4)
-  let msg = lenBytes <> rest
-  if isSslRequest msg
-    then do
-      -- Tell client we don't support SSL; it will retry with a plain startup
-      sendAll sock (BS.singleton 0x4E)  -- 'N'
-      recvStartup sock
-    else pure msg
+  if BS.null lenBytes
+    then pure BS.empty  -- client disconnected before sending startup
+    else do
+      let totalLen = fromIntegral (readInt32BE lenBytes) :: Int
+      rest <- recvExact sock (totalLen - 4)
+      let msg = lenBytes <> rest
+      if isSslRequest msg
+        then do
+          -- Tell client we don't support SSL; it will retry with a plain startup
+          sendAll sock (BS.singleton 0x4E)  -- 'N'
+          recvStartup sock
+        else pure msg
 
 -- SSLRequest magic: 4-byte length (8) + int32 80877103 (0x04D2162F)
 isSslRequest :: ByteString -> Bool
