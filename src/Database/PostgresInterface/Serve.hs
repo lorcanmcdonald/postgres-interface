@@ -12,11 +12,12 @@ import Network.Socket
 
 data ServerConfig = ServerConfig
   { serverPort :: Int
+  , serverHost :: Maybe String  -- ^ Nothing = all interfaces (0.0.0.0); Just "127.0.0.1" = loopback only
   }
   deriving (Show)
 
 defaultConfig :: ServerConfig
-defaultConfig = ServerConfig { serverPort = 5432 }
+defaultConfig = ServerConfig { serverPort = 5432, serverHost = Nothing }
 
 -- | Start a PostgreSQL-compatible server, accepting connections in a loop.
 servePostgres :: ServerConfig -> [AnyTable] -> IO ()
@@ -27,7 +28,7 @@ servePostgres cfg tables =
   where
     resolve port = do
       let hints = defaultHints { addrFlags = [AI_PASSIVE], addrSocketType = Stream }
-      head <$> getAddrInfo (Just hints) (Just "127.0.0.1") (Just (show port))
+      head <$> getAddrInfo (Just hints) (serverHost cfg) (Just (show port))
 
     open addr = do
       sock <- socket (addrFamily addr) (addrSocketType addr) (addrProtocol addr)

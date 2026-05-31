@@ -28,7 +28,7 @@ tests = testGroup "Protocol.Integration"
 withTestServer :: [AnyTable] -> (Int -> IO a) -> IO a
 withTestServer tables action = do
   port <- findFreePort
-  let cfg = ServerConfig { serverPort = port }
+  let cfg = ServerConfig { serverPort = port, serverHost = Just "127.0.0.1" }
   withAsync (servePostgres cfg tables) $ \_serverThread -> do
     threadDelay 50000  -- 50ms: let the server start listening
     action port
