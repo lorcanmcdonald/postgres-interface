@@ -44,6 +44,18 @@ library
     , scientific        >= 0.3
     , int-cast          >= 0.2
 
+executable example
+  import:           warnings
+  hs-source-dirs:   example
+  main-is:          Main.hs
+  default-language: GHC2021
+  build-depends:
+      base
+    , postgres-interface
+    , text
+    , time
+    , conduit
+
 test-suite postgres-interface-test
   import:           warnings
   type:             exitcode-stdio-1.0
