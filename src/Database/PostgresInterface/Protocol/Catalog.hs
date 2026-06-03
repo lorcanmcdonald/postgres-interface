@@ -20,6 +20,10 @@ handleCatalogQuery sql =
 
 matchCatalog :: Text -> Maybe [BackendMessage]
 matchCatalog sql
+  -- Empty query
+  | T.null sql || sql == ";"
+  = Just [EmptyQueryResponse]
+
   -- SET statements — silently succeed
   | "set " `T.isPrefixOf` sql
   = Just [CommandComplete "SET"]
@@ -46,6 +50,20 @@ matchCatalog sql
   | sql `matches` ["show server_version"]
   = Just $ rowResult [FieldInfo "server_version" 25 0]
                      [[textVal "14.0"]]
+                     "SELECT 1"
+
+  -- SHOW server_version_num
+  | sql `matches` ["show server_version_num"]
+  = Just $ rowResult [FieldInfo "server_version_num" 25 0]
+                     [[textVal "140000"]]
+                     "SELECT 1"
+
+  -- SELECT current_setting('server_version_num') — used by Grafana/pgx for version detection
+  -- Returns server_version_num (140000). The ::int/100 cast/division happens client-side
+  -- after we return the text value, so we just return the raw number string.
+  | "current_setting" `T.isInfixOf` sql && "server_version_num" `T.isInfixOf` sql
+  = Just $ rowResult [FieldInfo "version" 23 0]
+                     [[textVal "1400"]]
                      "SELECT 1"
 
   -- SELECT current_database()
