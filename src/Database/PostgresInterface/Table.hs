@@ -9,10 +9,20 @@ module Database.PostgresInterface.Table
   , AnyTable (..)
   , anyTable
   , naiveTable
+  , dynAnyTable
   , findTable
   , executeTable
   , executeTableRows
   , describeTable
+  -- Shared evaluation helpers (used by Table.Dynamic)
+  , evalPred
+  , evalCompOp
+  , applyOp
+  , compareColumnValues
+  , flipOrd
+  , selectColumns
+  , encodeValue
+  , toFieldInfo
   ) where
 
 import Conduit (ConduitT, runConduit, yieldMany, (.|))
@@ -41,7 +51,13 @@ data Table a = Table
   , tableHandler :: QueryPlan -> IO (ConduitT () a IO ())
   }
 
-data AnyTable = forall a. Queryable a => AnyTable (Table a)
+data AnyTable
+  = forall a. Queryable a => AnyTable (Table a)
+  | DynTable
+      { dynName    :: Text
+      , dynSchema  :: Schema
+      , dynHandler :: QueryPlan -> IO (ConduitT () [ColumnValue] IO ())
+      }
 
 anyTable
   :: Queryable a
@@ -49,6 +65,16 @@ anyTable
   -> (QueryPlan -> IO (ConduitT () a IO ()))
   -> AnyTable
 anyTable name handler = AnyTable (Table name handler)
+
+-- | Register a dynamic table whose schema is determined at runtime (as a list
+-- of (column-name, ColumnType) pairs) rather than via the Queryable typeclass.
+-- Rows are produced as [ColumnValue] lists matching the schema order.
+dynAnyTable
+  :: Text
+  -> Schema
+  -> (QueryPlan -> IO (ConduitT () [ColumnValue] IO ()))
+  -> AnyTable
+dynAnyTable = DynTable
 
 -- | Register a table backed by a plain stream.
 -- The library applies WHERE predicates, ORDER BY sorting (materialising all rows),
@@ -160,6 +186,9 @@ findTable name = foldr check Nothing
     check t@(AnyTable tbl) acc
       | tableName tbl == name = Just t
       | otherwise             = acc
+    check t@(DynTable n _ _) acc
+      | n == name = Just t
+      | otherwise = acc
 
 -- | Compute RowDescription field descriptors for a table without executing the query.
 -- Used by the extended query protocol Describe handler.
@@ -168,12 +197,15 @@ describeTable (AnyTable tbl) plan =
   let fullSchema   = anyTableSchema tbl
       activeSchema = selectColumns (qpColumns plan) fullSchema
   in map toFieldInfo activeSchema
+describeTable (DynTable _ sch _) plan =
+  let activeSchema = selectColumns (qpColumns plan) sch
+  in map toFieldInfo activeSchema
 
 -- | Execute a query plan, returning RowDescription + DataRows + CommandComplete.
 -- Use for the Simple Query protocol where schema is sent inline with results.
 executeTable :: AnyTable -> QueryPlan -> IO [BackendMessage]
 executeTable tbl plan = do
-  rows <- executeTableRows tbl plan
+  rows   <- executeTableRows tbl plan
   let fields = describeTable tbl plan
   pure $ RowDescription fields : rows
 
@@ -189,9 +221,22 @@ executeTableRows (AnyTable tbl) plan = do
   let dataRows = map (mkDataRow fullSchema activeSchema) rows
       tag      = "SELECT " <> T.pack (show (length dataRows))
   pure $ dataRows ++ [CommandComplete tag]
+executeTableRows (DynTable _ sch handler) plan = do
+  source <- handler plan
+  let activeSchema = selectColumns (qpColumns plan) sch
+      activeIdxs   = [ i | (i, (n, _)) <- zip [0..] sch
+                         , n `elem` map fst activeSchema ]
+  rows <- collectRows source (qpLimit plan)
+  let dataRows = map (mkDynDataRow activeIdxs) rows
+      tag      = "SELECT " <> T.pack (show (length dataRows))
+  pure $ dataRows ++ [CommandComplete tag]
 
 anyTableSchema :: forall b. Queryable b => Table b -> Schema
 anyTableSchema _ = schema @b
+
+mkDynDataRow :: [Int] -> [ColumnValue] -> BackendMessage
+mkDynDataRow idxs vals =
+  DataRow (map encodeValue [ v | (i, v) <- zip [0..] vals, i `elem` idxs ])
 
 selectColumns :: ColumnSelection -> Schema -> Schema
 selectColumns AllColumns      sch = sch

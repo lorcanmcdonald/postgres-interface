@@ -29,6 +29,7 @@ library
     Database.PostgresInterface.Queryable
     Database.PostgresInterface.Queryable.Generic
     Database.PostgresInterface.Table
+    Database.PostgresInterface.Table.Dynamic
     Database.PostgresInterface.Table.Pushdown
     Database.PostgresInterface.Serve
   build-depends:
@@ -70,6 +71,7 @@ test-suite postgres-interface-test
     QueryableSpec
     EndToEndSpec
     TableSpec
+    Table.DynamicSpec
   build-depends:
       base
     , postgres-interface
