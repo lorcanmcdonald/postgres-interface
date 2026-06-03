@@ -41,6 +41,12 @@ data BackendMessage
   | CommandComplete Text             -- e.g. "SELECT 3"
   | ErrorResponse PgError
   | EmptyQueryResponse
+  -- Extended query protocol responses
+  | ParseComplete
+  | BindComplete
+  | CloseComplete
+  | ParameterDescription             -- always 0 parameters (no parameterised queries)
+  | NoData
   deriving (Eq, Show)
 
 -- | Messages sent from client to server
@@ -49,4 +55,10 @@ data FrontendMessage
   | Query Text                           -- simple query
   | Sync                                 -- extended-protocol pipeline flush
   | Terminate
+  -- Extended query protocol
+  | ParseMsg  Text Text  -- statement-name, SQL
+  | DescribeMsg Char Text  -- 'S'=statement / 'P'=portal, name
+  | BindMsg   Text Text  -- portal-name, statement-name
+  | ExecuteMsg Text Int  -- portal-name, max-rows (0 = unlimited)
+  | CloseMsg  Char Text  -- 'S'=statement / 'P'=portal, name
   deriving (Eq, Show)

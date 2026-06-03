@@ -7,17 +7,30 @@ module Database.PostgresInterface.Protocol.Server
 import Control.Exception (finally)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
+import Data.IORef
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Database.PostgresInterface.Protocol.Catalog (handleCatalogQuery)
 import Database.PostgresInterface.Protocol.Decoder (decodeFrontendMessage, decodeStartup)
 import Database.PostgresInterface.Protocol.Encoder (encodeBackendMessage)
 import Database.PostgresInterface.Protocol.Messages
 import Database.PostgresInterface.Sql.Parse (parseSql)
 import Database.PostgresInterface.Sql.Plan (QueryError (..), QueryPlan (..), toQueryPlan)
-import Database.PostgresInterface.Table (AnyTable, findTable, executeTable)
+import Database.PostgresInterface.Table (AnyTable, findTable, executeTable, describeTable)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
+
+-- | State for the extended query protocol (prepared statements and portals).
+-- Both maps are keyed on name; the unnamed statement/portal uses the empty string.
+data ExtState = ExtState
+  { extStatements :: IORef (Map Text Text)  -- statement-name → SQL
+  , extPortals    :: IORef (Map Text Text)  -- portal-name    → SQL
+  }
+
+newExtState :: IO ExtState
+newExtState = ExtState <$> newIORef Map.empty <*> newIORef Map.empty
 
 -- | Handle a single client connection: startup handshake then message loop.
 runConnection :: [AnyTable] -> Socket -> IO ()
@@ -34,7 +47,8 @@ runConnection tables sock = handleConnection `finally` pure ()
           mapM_ (sendAll sock . encodeBackendMessage) defaultParams
           sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
           -- Enter message loop
-          messageLoop tables sock
+          ext <- newExtState
+          messageLoop tables sock ext
         Right _ ->
           sendError sock (internalError "unexpected message during startup")
 
@@ -62,39 +76,99 @@ isSslRequest bs =
   BS.length bs == 8 && readInt32BE (BS.drop 4 bs) == 80877103
 
 -- | Main message loop: read messages until Terminate or connection closed
-messageLoop :: [AnyTable] -> Socket -> IO ()
-messageLoop tables sock = do
+messageLoop :: [AnyTable] -> Socket -> ExtState -> IO ()
+messageLoop tables sock ext = do
   -- All messages after startup: 1 type byte + 4 byte length
   headerBytes <- recvExact sock 5
   if BS.null headerBytes
     then pure ()  -- client disconnected cleanly
-    else messageLoop' tables sock headerBytes
+    else messageLoop' tables sock ext headerBytes
 
-messageLoop' :: [AnyTable] -> Socket -> ByteString -> IO ()
-messageLoop' tables sock headerBytes = do
+messageLoop' :: [AnyTable] -> Socket -> ExtState -> ByteString -> IO ()
+messageLoop' tables sock ext headerBytes = do
   let msgLen = fromIntegral (readInt32BE (BS.drop 1 headerBytes)) :: Int
       payloadLen = msgLen - 4
   payload <- recvExact sock payloadLen
   let raw = headerBytes <> payload
+      loop = messageLoop tables sock ext
   case decodeFrontendMessage raw of
     Left err -> do
       sendError sock (internalError ("decode error: " <> err))
-      messageLoop tables sock
+      loop
+
     Right Terminate -> pure ()
+
     Right Sync -> do
       sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
-      messageLoop tables sock
+      loop
+
     Right (Query sql) -> do
       case handleCatalogQuery sql of
-        Just msgs ->
-          mapM_ (sendAll sock . encodeBackendMessage) msgs
-        Nothing ->
-          handleUserQuery tables sock sql
+        Just msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
+        Nothing   -> handleUserQuery tables sock sql
       sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
-      messageLoop tables sock
+      loop
+
+    -- Extended query protocol -------------------------------------------------
+
+    Right (ParseMsg name sql) -> do
+      modifyIORef (extStatements ext) (Map.insert name sql)
+      sendAll sock (encodeBackendMessage ParseComplete)
+      loop
+
+    Right (DescribeMsg kind name) -> do
+      sql <- case kind of
+        'S' -> Map.lookup name <$> readIORef (extStatements ext)
+        _   -> Map.lookup name <$> readIORef (extPortals ext)
+      sendAll sock (encodeBackendMessage ParameterDescription)
+      case sql >>= describeSQL tables of
+        Nothing     -> sendAll sock (encodeBackendMessage NoData)
+        Just fields -> sendAll sock (encodeBackendMessage (RowDescription fields))
+      loop
+
+    Right (BindMsg portal stmt) -> do
+      stmts <- readIORef (extStatements ext)
+      case Map.lookup stmt stmts of
+        Nothing  -> sendError sock (PgError SeverityError "26000"
+                      ("prepared statement \"" <> stmt <> "\" does not exist"))
+        Just sql -> modifyIORef (extPortals ext) (Map.insert portal sql)
+      sendAll sock (encodeBackendMessage BindComplete)
+      loop
+
+    Right (ExecuteMsg portal _limit) -> do
+      portals <- readIORef (extPortals ext)
+      case Map.lookup portal portals of
+        Nothing  -> sendError sock (PgError SeverityError "34000"
+                      ("portal \"" <> portal <> "\" does not exist"))
+        Just sql ->
+          case handleCatalogQuery sql of
+            Just msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
+            Nothing   -> handleUserQuery tables sock sql
+      loop
+
+    Right (CloseMsg _ name) -> do
+      modifyIORef (extStatements ext) (Map.delete name)
+      modifyIORef (extPortals ext)    (Map.delete name)
+      sendAll sock (encodeBackendMessage CloseComplete)
+      loop
+
     Right msg ->
       sendError sock (internalError ("unexpected message: " <> show msg))
 
+
+-- | Resolve the RowDescription fields for a SQL string without executing it.
+-- Returns Nothing if the query can't be planned or the table isn't registered.
+describeSQL :: [AnyTable] -> Text -> Maybe [FieldInfo]
+describeSQL tables sql =
+  case parseSql sql of
+    Left  _   -> Nothing
+    Right ast ->
+      case toQueryPlan ast of
+        Left  _    -> Nothing
+        Right plan ->
+          case findTable (qpTable plan) tables of
+            Nothing  -> Nothing
+            Just tbl -> Just (describeTable tbl plan)
 
 handleUserQuery :: [AnyTable] -> Socket -> Text -> IO ()
 handleUserQuery tables sock sql =

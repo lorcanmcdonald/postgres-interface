@@ -60,6 +60,22 @@ encodeBackendMessage msg = BL.toStrict $ runPut $ case msg of
       putErrorField 0x4D (pgErrorMessage err)                  -- M: message
       putWord8 0x00                                            -- terminator
 
+  ParseComplete ->
+    tagged 0x31 $ pure ()   -- '1'
+
+  BindComplete ->
+    tagged 0x32 $ pure ()   -- '2'
+
+  CloseComplete ->
+    tagged 0x33 $ pure ()   -- '3'
+
+  ParameterDescription ->
+    -- 't' + length + int16 param-count (always 0; no parameterised queries)
+    tagged 0x74 $ putInt16be 0
+
+  NoData ->
+    tagged 0x6E $ pure ()   -- 'n'
+
 -- | Write a message with type byte + length-prefixed payload.
 -- Length field = 4 (itself) + payload length.
 tagged :: Word8 -> Put -> Put

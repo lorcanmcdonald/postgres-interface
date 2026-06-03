@@ -43,6 +43,7 @@ library
     , time              >= 1.12
     , scientific        >= 0.3
     , int-cast          >= 0.2
+    , containers        >= 0.6
 
 executable example
   import:           warnings

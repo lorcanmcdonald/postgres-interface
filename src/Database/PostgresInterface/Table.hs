@@ -11,6 +11,7 @@ module Database.PostgresInterface.Table
   , naiveTable
   , findTable
   , executeTable
+  , describeTable
   ) where
 
 import Conduit (ConduitT, runConduit, yieldMany, (.|))
@@ -159,39 +160,49 @@ findTable name = foldr check Nothing
       | tableName tbl == name = Just t
       | otherwise             = acc
 
+-- | Compute RowDescription field descriptors for a table without executing the query.
+-- Used by the extended query protocol Describe handler.
+describeTable :: AnyTable -> QueryPlan -> [FieldInfo]
+describeTable (AnyTable tbl) plan =
+  let fullSchema   = anyTableSchema tbl
+      activeSchema = selectColumns (qpColumns plan) fullSchema
+  in map toFieldInfo activeSchema
+
 -- | Execute a query plan against a registered table, returning wire messages.
 executeTable :: AnyTable -> QueryPlan -> IO [BackendMessage]
 executeTable (AnyTable tbl) plan = do
   source <- tableHandler tbl plan
-  let fullSchema  = tableSchema tbl
-      activeSchema = case qpColumns plan of
-        AllColumns      -> fullSchema
-        NamedColumns ns -> filter (\(n, _) -> n `elem` ns) fullSchema
-      fieldInfos = map toFieldInfo activeSchema
-  rows    <- collectRows source (qpLimit plan)
+  let fullSchema   = anyTableSchema tbl
+      activeSchema = selectColumns (qpColumns plan) fullSchema
+      fieldInfos   = map toFieldInfo activeSchema
+  rows <- collectRows source (qpLimit plan)
   let dataRows = map (mkDataRow fullSchema activeSchema) rows
       tag      = "SELECT " <> T.pack (show (length dataRows))
   pure $ [RowDescription fieldInfos] ++ dataRows ++ [CommandComplete tag]
-  where
-    tableSchema :: forall b. Queryable b => Table b -> Schema
-    tableSchema _ = schema @b
 
-    toFieldInfo :: (Text, ColumnType) -> FieldInfo
-    toFieldInfo (name, colType) = FieldInfo
-      { fieldName    = name
-      , fieldTypeOid = columnTypeOid colType
-      , fieldFormat  = 0
-      }
+anyTableSchema :: forall b. Queryable b => Table b -> Schema
+anyTableSchema _ = schema @b
 
-    mkDataRow :: Queryable b => Schema -> Schema -> b -> BackendMessage
-    mkDataRow fullSch activeSch row =
-      let allVals   = zip (map fst fullSch) (toRow row)
-          projected = [ v | (n, v) <- allVals, n `elem` map fst activeSch ]
-      in DataRow (map encodeValue projected)
+selectColumns :: ColumnSelection -> Schema -> Schema
+selectColumns AllColumns      sch = sch
+selectColumns (NamedColumns ns) sch = filter (\(n, _) -> n `elem` ns) sch
 
-    collectRows :: ConduitT () a IO () -> Maybe Int -> IO [a]
-    collectRows source Nothing  = runConduit (source .| C.sinkList)
-    collectRows source (Just n) = runConduit (source .| C.takeC n .| C.sinkList)
+toFieldInfo :: (Text, ColumnType) -> FieldInfo
+toFieldInfo (name, colType) = FieldInfo
+  { fieldName    = name
+  , fieldTypeOid = columnTypeOid colType
+  , fieldFormat  = 0
+  }
+
+mkDataRow :: Queryable b => Schema -> Schema -> b -> BackendMessage
+mkDataRow fullSch activeSch row =
+  let allVals   = zip (map fst fullSch) (toRow row)
+      projected = [ v | (n, v) <- allVals, n `elem` map fst activeSch ]
+  in DataRow (map encodeValue projected)
+
+collectRows :: ConduitT () a IO () -> Maybe Int -> IO [a]
+collectRows source Nothing  = runConduit (source .| C.sinkList)
+collectRows source (Just n) = runConduit (source .| C.takeC n .| C.sinkList)
 
 encodeValue :: ColumnValue -> Maybe ByteString
 encodeValue PgNull           = Nothing

@@ -6,12 +6,18 @@ module Protocol.IntegrationSpec (tests, withTestServer) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception (SomeException, bracket, try)
-import Data.Binary.Put (putByteString, putInt32be, putWord8, runPut)
+import Data.Binary.Put (putByteString, putInt16be, putInt32be, putWord8, runPut)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Conduit (yieldMany)
+import Data.Int (Int32)
+import Data.Text (Text)
+import GHC.Generics (Generic)
+import Database.PostgresInterface.Queryable
+import Database.PostgresInterface.Queryable.Generic ()
 import Database.PostgresInterface.Serve (ServerConfig (..), servePostgres)
-import Database.PostgresInterface.Table (AnyTable)
+import Database.PostgresInterface.Table (AnyTable, naiveTable)
 import Database.PostgreSQL.Simple (ConnectInfo (..), Only (..), defaultConnectInfo, query_)
 import Database.PostgreSQL.Simple qualified as PG
 import Network.Socket (Family (..), SockAddr (..), SocketType (..), bind, socket, socketPort)
@@ -28,6 +34,8 @@ tests = testGroup "Protocol.Integration"
   , testCase "SELECT current_schema() returns public" testCurrentSchema
   , testCase "SHOW transaction_isolation returns a value" testTxIsolation
   , testCase "Sync message is answered with ReadyForQuery" testSyncReadyForQuery
+  , testCase "Parse is answered with ParseComplete" testParseComplete
+  , testCase "Parse+Bind+Execute+Sync returns rows" testExtendedQuery
   ]
 
 -- | Start a test server on a random port, run the action, then stop.
@@ -160,6 +168,91 @@ readInt32BE bs =
   + fromIntegral (BS.index bs 1) * 65536
   + fromIntegral (BS.index bs 2) * 256
   + fromIntegral (BS.index bs 3)
+
+-- | Verify that Parse (0x50) returns ParseComplete (0x31), not ErrorResponse.
+testParseComplete :: Assertion
+testParseComplete = withTestServer [] $ \port -> do
+  bracket (rawConnect port) NS.close $ \sock -> do
+    sendAll sock startupMsg
+    recvUntilReady sock
+    sendAll sock (rawParseMsg "" "SELECT version()")
+    sendAll sock syncMsg
+    resp <- recv sock 1
+    resp @?= BS.singleton 0x31  -- '1' = ParseComplete
+
+-- | Full extended query flow: Parse + Bind + Execute + Sync returns data rows.
+testExtendedQuery :: Assertion
+testExtendedQuery = withTestServer [naiveTable "items" (pure (yieldMany testItems))] $ \port -> do
+  bracket (rawConnect port) NS.close $ \sock -> do
+    sendAll sock startupMsg
+    recvUntilReady sock
+    sendAll sock (rawParseMsg "" "SELECT * FROM items")
+    sendAll sock (rawBindMsg "" "")
+    sendAll sock (rawExecuteMsg "" 0)
+    sendAll sock syncMsg
+    resp <- recvAllBytes sock
+    -- ParseComplete (0x31) and BindComplete (0x32) must both be present
+    assertBool "ParseComplete in response" (0x31 `BS.elem` resp)
+    assertBool "BindComplete in response"  (0x32 `BS.elem` resp)
+    -- CommandComplete ('C' = 0x43) must be present
+    assertBool "CommandComplete in response" (0x43 `BS.elem` resp)
+
+-- | Simple row type for extended query regression test
+data Item = Item { itemName :: Text, itemQty :: Int32 }
+  deriving (Generic, Show)
+
+instance Queryable Item
+
+testItems :: [Item]
+testItems = [Item "apple" 10, Item "banana" 5]
+
+-- | Build a Parse frontend message
+rawParseMsg :: BS.ByteString -> String -> ByteString
+rawParseMsg name sql = BL.toStrict $ runPut $ do
+  let body = BL.toStrict $ runPut $ do
+        putByteString name >> putWord8 0
+        putByteString (BS.pack (map (toEnum . fromEnum) sql)) >> putWord8 0
+        putInt16be 0  -- no param type hints
+  putWord8 0x50  -- 'P'
+  putInt32be (fromIntegral (4 + BS.length body))
+  putByteString body
+
+-- | Build a Bind frontend message (unnamed portal + unnamed stmt, no params)
+rawBindMsg :: BS.ByteString -> BS.ByteString -> ByteString
+rawBindMsg portal stmt = BL.toStrict $ runPut $ do
+  let body = BL.toStrict $ runPut $ do
+        putByteString portal >> putWord8 0
+        putByteString stmt   >> putWord8 0
+        putInt16be 0  -- nFormats
+        putInt16be 0  -- nParams
+        putInt16be 0  -- nResultFormats
+  putWord8 0x42  -- 'B'
+  putInt32be (fromIntegral (4 + BS.length body))
+  putByteString body
+
+-- | Build an Execute frontend message
+rawExecuteMsg :: BS.ByteString -> Int -> ByteString
+rawExecuteMsg portal maxRows = BL.toStrict $ runPut $ do
+  let body = BL.toStrict $ runPut $ do
+        putByteString portal >> putWord8 0
+        putInt32be (fromIntegral maxRows)
+  putWord8 0x45  -- 'E'
+  putInt32be (fromIntegral (4 + BS.length body))
+  putByteString body
+
+-- | Read all bytes until ReadyForQuery
+recvAllBytes :: NS.Socket -> IO ByteString
+recvAllBytes sock = go BS.empty
+  where
+    go acc = do
+      chunk <- recv sock 4096
+      let acc' = acc <> chunk
+      if BS.null chunk || BS.singleton 0x5A `BS.isSuffixOf` BS.take 1 (BS.drop (BS.length acc' - 6) acc')
+        then pure acc'
+        else if b'Z' `BS.elem` acc'
+          then pure acc'
+          else go acc'
+    b'Z' = 0x5A
 
 -- Helpers
 startsWith :: String -> String -> Bool
