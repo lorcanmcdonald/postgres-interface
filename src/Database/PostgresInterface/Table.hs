@@ -11,6 +11,7 @@ module Database.PostgresInterface.Table
   , naiveTable
   , findTable
   , executeTable
+  , executeTableRows
   , describeTable
   ) where
 
@@ -168,17 +169,26 @@ describeTable (AnyTable tbl) plan =
       activeSchema = selectColumns (qpColumns plan) fullSchema
   in map toFieldInfo activeSchema
 
--- | Execute a query plan against a registered table, returning wire messages.
+-- | Execute a query plan, returning RowDescription + DataRows + CommandComplete.
+-- Use for the Simple Query protocol where schema is sent inline with results.
 executeTable :: AnyTable -> QueryPlan -> IO [BackendMessage]
-executeTable (AnyTable tbl) plan = do
+executeTable tbl plan = do
+  rows <- executeTableRows tbl plan
+  let fields = describeTable tbl plan
+  pure $ RowDescription fields : rows
+
+-- | Execute a query plan, returning only DataRows + CommandComplete.
+-- Use for the Extended Query protocol Execute step: the client already received
+-- RowDescription from the preceding Describe step and must not receive it again.
+executeTableRows :: AnyTable -> QueryPlan -> IO [BackendMessage]
+executeTableRows (AnyTable tbl) plan = do
   source <- tableHandler tbl plan
   let fullSchema   = anyTableSchema tbl
       activeSchema = selectColumns (qpColumns plan) fullSchema
-      fieldInfos   = map toFieldInfo activeSchema
   rows <- collectRows source (qpLimit plan)
   let dataRows = map (mkDataRow fullSchema activeSchema) rows
       tag      = "SELECT " <> T.pack (show (length dataRows))
-  pure $ [RowDescription fieldInfos] ++ dataRows ++ [CommandComplete tag]
+  pure $ dataRows ++ [CommandComplete tag]
 
 anyTableSchema :: forall b. Queryable b => Table b -> Schema
 anyTableSchema _ = schema @b

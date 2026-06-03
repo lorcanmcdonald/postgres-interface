@@ -10,6 +10,7 @@ import Data.Binary.Put (putByteString, putInt16be, putInt32be, putWord8, runPut)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
+import Data.Word (Word8)
 import Conduit (yieldMany)
 import Data.Int (Int32)
 import Data.Text (Text)
@@ -36,6 +37,7 @@ tests = testGroup "Protocol.Integration"
   , testCase "Sync message is answered with ReadyForQuery" testSyncReadyForQuery
   , testCase "Parse is answered with ParseComplete" testParseComplete
   , testCase "Parse+Bind+Execute+Sync returns rows" testExtendedQuery
+  , testCase "Execute does not repeat RowDescription after Describe" testNoRowDescriptionInExecute
   ]
 
 -- | Start a test server on a random port, run the action, then stop.
@@ -190,12 +192,43 @@ testExtendedQuery = withTestServer [naiveTable "items" (pure (yieldMany testItem
     sendAll sock (rawBindMsg "" "")
     sendAll sock (rawExecuteMsg "" 0)
     sendAll sock syncMsg
-    resp <- recvAllBytes sock
+    types <- recvMsgTypes sock
     -- ParseComplete (0x31) and BindComplete (0x32) must both be present
-    assertBool "ParseComplete in response" (0x31 `BS.elem` resp)
-    assertBool "BindComplete in response"  (0x32 `BS.elem` resp)
+    assertBool "ParseComplete in response"  (0x31 `elem` types)
+    assertBool "BindComplete in response"   (0x32 `elem` types)
     -- CommandComplete ('C' = 0x43) must be present
-    assertBool "CommandComplete in response" (0x43 `BS.elem` resp)
+    assertBool "CommandComplete in response" (0x43 `elem` types)
+
+-- | Two-round-trip pgx flow: Parse+Describe+Sync, then Bind+Execute+Sync.
+-- RowDescription must appear in round 1 and must NOT appear in round 2.
+testNoRowDescriptionInExecute :: Assertion
+testNoRowDescriptionInExecute =
+  withTestServer [naiveTable "items" (pure (yieldMany testItems))] $ \port -> do
+    bracket (rawConnect port) NS.close $ \sock -> do
+      sendAll sock startupMsg
+      recvUntilReady sock
+      -- Round 1: Parse + Describe + Sync
+      sendAll sock (rawParseMsg "" "SELECT * FROM items")
+      sendAll sock (rawDescribeMsg 'S' "")
+      sendAll sock syncMsg
+      round1 <- recvMsgTypes sock
+      assertBool "RowDescription present in round 1"  (0x54 `elem` round1)  -- 'T'
+      -- Round 2: Bind + Execute + Sync
+      sendAll sock (rawBindMsg "" "")
+      sendAll sock (rawExecuteMsg "" 0)
+      sendAll sock syncMsg
+      round2 <- recvMsgTypes sock
+      assertBool "RowDescription absent from round 2" (0x54 `notElem` round2)  -- 'T'
+
+-- | Build a Describe frontend message
+rawDescribeMsg :: Char -> BS.ByteString -> ByteString
+rawDescribeMsg kind name = BL.toStrict $ runPut $ do
+  let body = BL.toStrict $ runPut $ do
+        putWord8 (fromIntegral (fromEnum kind))
+        putByteString name >> putWord8 0
+  putWord8 0x44  -- 'D'
+  putInt32be (fromIntegral (4 + BS.length body))
+  putByteString body
 
 -- | Simple row type for extended query regression test
 data Item = Item { itemName :: Text, itemQty :: Int32 }
@@ -240,19 +273,30 @@ rawExecuteMsg portal maxRows = BL.toStrict $ runPut $ do
   putInt32be (fromIntegral (4 + BS.length body))
   putByteString body
 
--- | Read all bytes until ReadyForQuery
-recvAllBytes :: NS.Socket -> IO ByteString
-recvAllBytes sock = go BS.empty
-  where
-    go acc = do
-      chunk <- recv sock 4096
-      let acc' = acc <> chunk
-      if BS.null chunk || BS.singleton 0x5A `BS.isSuffixOf` BS.take 1 (BS.drop (BS.length acc' - 6) acc')
-        then pure acc'
-        else if b'Z' `BS.elem` acc'
-          then pure acc'
-          else go acc'
-    b'Z' = 0x5A
+-- | Collect the type byte of every message until (and including) ReadyForQuery.
+-- Uses proper length-framed parsing so payload bytes never pollute the type list.
+recvMsgTypes :: NS.Socket -> IO [Word8]
+recvMsgTypes sock = do
+  hdr <- recvExactN sock 5
+  if BS.null hdr then pure []
+  else do
+    let typeByte = BS.index hdr 0
+        msgLen   = readInt32BE (BS.drop 1 hdr)
+    _payload <- recvExactN sock (msgLen - 4)
+    if typeByte == 0x5A  -- ReadyForQuery — stop here
+      then pure [typeByte]
+      else (typeByte :) <$> recvMsgTypes sock
+
+-- | Receive exactly n bytes, retrying on short reads.
+recvExactN :: NS.Socket -> Int -> IO ByteString
+recvExactN _ 0    = pure BS.empty
+recvExactN sock n = do
+  chunk <- recv sock n
+  if BS.null chunk then pure BS.empty
+  else if BS.length chunk == n then pure chunk
+  else do
+    rest <- recvExactN sock (n - BS.length chunk)
+    pure (chunk <> rest)
 
 -- Helpers
 startsWith :: String -> String -> Bool
