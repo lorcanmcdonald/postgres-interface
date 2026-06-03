@@ -21,6 +21,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Network.Socket (Socket)
 import Network.Socket.ByteString (recv, sendAll)
+import System.IO (hPutStrLn, stderr)
 
 -- | State for the extended query protocol (prepared statements and portals).
 -- Both maps are keyed on name; the unnamed statement/portal uses the empty string.
@@ -93,16 +94,19 @@ messageLoop' tables sock ext headerBytes = do
       loop = messageLoop tables sock ext
   case decodeFrontendMessage raw of
     Left err -> do
+      hPutStrLn stderr $ "[pg] decode error: " <> show err
       sendError sock (internalError ("decode error: " <> err))
       loop
 
-    Right Terminate -> pure ()
+    Right Terminate -> hPutStrLn stderr "[pg] Terminate"
 
     Right Sync -> do
+      hPutStrLn stderr "[pg] Sync → ReadyForQuery"
       sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
       loop
 
     Right (Query sql) -> do
+      hPutStrLn stderr $ "[pg] Query: " <> T.unpack sql
       case handleCatalogQuery sql of
         Just msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
         Nothing   -> handleUserQuery tables sock sql
@@ -112,21 +116,28 @@ messageLoop' tables sock ext headerBytes = do
     -- Extended query protocol -------------------------------------------------
 
     Right (ParseMsg name sql) -> do
+      hPutStrLn stderr $ "[pg] Parse stmt=" <> show name <> " sql=" <> T.unpack sql
       modifyIORef (extStatements ext) (Map.insert name sql)
       sendAll sock (encodeBackendMessage ParseComplete)
       loop
 
     Right (DescribeMsg kind name) -> do
+      hPutStrLn stderr $ "[pg] Describe kind=" <> [kind] <> " name=" <> show name
       sql <- case kind of
         'S' -> Map.lookup name <$> readIORef (extStatements ext)
         _   -> Map.lookup name <$> readIORef (extPortals ext)
       sendAll sock (encodeBackendMessage ParameterDescription)
       case sql >>= describeSQL tables of
-        Nothing     -> sendAll sock (encodeBackendMessage NoData)
-        Just fields -> sendAll sock (encodeBackendMessage (RowDescription fields))
+        Nothing     -> do
+          hPutStrLn stderr $ "[pg]   → NoData (sql=" <> show sql <> ")"
+          sendAll sock (encodeBackendMessage NoData)
+        Just fields -> do
+          hPutStrLn stderr $ "[pg]   → RowDescription (" <> show (length fields) <> " fields)"
+          sendAll sock (encodeBackendMessage (RowDescription fields))
       loop
 
     Right (BindMsg portal stmt) -> do
+      hPutStrLn stderr $ "[pg] Bind portal=" <> show portal <> " stmt=" <> show stmt
       stmts <- readIORef (extStatements ext)
       case Map.lookup stmt stmts of
         Nothing  -> sendError sock (PgError SeverityError "26000"
@@ -137,23 +148,30 @@ messageLoop' tables sock ext headerBytes = do
 
     Right (ExecuteMsg portal _limit) -> do
       portals <- readIORef (extPortals ext)
-      case Map.lookup portal portals of
+      let msql = Map.lookup portal portals
+      hPutStrLn stderr $ "[pg] Execute portal=" <> show portal <> " sql=" <> show msql
+      case msql of
         Nothing  -> sendError sock (PgError SeverityError "34000"
                       ("portal \"" <> portal <> "\" does not exist"))
         Just sql ->
           case handleCatalogQuery sql of
-            -- Catalog responses include RowDescription; strip it — Execute must not repeat it.
-            Just msgs -> mapM_ (sendAll sock . encodeBackendMessage) (stripRowDescription msgs)
-            Nothing   -> handleExecuteQuery tables sock sql
+            Just msgs -> do
+              hPutStrLn stderr "[pg]   → catalog (stripped RowDescription)"
+              mapM_ (sendAll sock . encodeBackendMessage) (stripRowDescription msgs)
+            Nothing   -> do
+              hPutStrLn stderr "[pg]   → user query"
+              handleExecuteQuery tables sock sql
       loop
 
     Right (CloseMsg _ name) -> do
+      hPutStrLn stderr $ "[pg] Close name=" <> show name
       modifyIORef (extStatements ext) (Map.delete name)
       modifyIORef (extPortals ext)    (Map.delete name)
       sendAll sock (encodeBackendMessage CloseComplete)
       loop
 
-    Right msg ->
+    Right msg -> do
+      hPutStrLn stderr $ "[pg] unexpected: " <> show msg
       sendError sock (internalError ("unexpected message: " <> show msg))
 
 
