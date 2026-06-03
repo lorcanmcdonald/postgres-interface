@@ -85,6 +85,9 @@ matchCatalog sql
   | "pg_attribute" `T.isInfixOf` sql
   = Just $ emptyResult [FieldInfo "attname" 19 0, FieldInfo "atttypid" 26 0]
 
+  | "pg_extension" `T.isInfixOf` sql
+  = Just $ emptyResult [FieldInfo "extname" 19 0, FieldInfo "extversion" 25 0]
+
   | "information_schema" `T.isInfixOf` sql
   = Just $ emptyResult [FieldInfo "table_name" 25 0, FieldInfo "table_schema" 25 0]
 
