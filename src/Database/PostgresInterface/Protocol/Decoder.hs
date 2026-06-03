@@ -66,6 +66,7 @@ parseFrontend = do
   payload  <- getByteString payloadLen
   case typeByte of
     0x51 -> parseQuery payload   -- 'Q'
+    0x53 -> pure Sync            -- 'S'
     0x58 -> pure Terminate       -- 'X'
     _    -> fail ("unknown frontend message type: " <> show typeByte)
 

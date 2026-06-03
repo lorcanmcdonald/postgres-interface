@@ -32,6 +32,7 @@ tests = testGroup "Protocol.Messages"
     , testCase "Query message" testDecodeQuery
     , testCase "Terminate message" testDecodeTerminate
     , testCase "Startup unknown param preserved" testDecodeStartupParams
+    , testCase "Sync message (0x53)" testDecodeSync
     ]
   ]
 
@@ -159,4 +160,12 @@ testDecodeTerminate = do
   case decodeFrontendMessage raw of
     Left err -> assertFailure ("decode failed: " <> err)
     Right Terminate -> pure ()
+    Right other -> assertFailure ("unexpected: " <> show other)
+
+testDecodeSync :: Assertion
+testDecodeSync = do
+  let raw = buildFrontendMsg 0x53 BS.empty  -- 'S'
+  case decodeFrontendMessage raw of
+    Left err -> assertFailure ("decode failed: " <> err)
+    Right Sync -> pure ()
     Right other -> assertFailure ("unexpected: " <> show other)

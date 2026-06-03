@@ -6,12 +6,17 @@ module Protocol.IntegrationSpec (tests, withTestServer) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception (SomeException, bracket, try)
+import Data.Binary.Put (putByteString, putInt32be, putWord8, runPut)
+import Data.ByteString (ByteString)
+import Data.ByteString qualified as BS
+import Data.ByteString.Lazy qualified as BL
 import Database.PostgresInterface.Serve (ServerConfig (..), servePostgres)
 import Database.PostgresInterface.Table (AnyTable)
-import Database.PostgreSQL.Simple (ConnectInfo (..), Only (..), connect, defaultConnectInfo, query_)
+import Database.PostgreSQL.Simple (ConnectInfo (..), Only (..), defaultConnectInfo, query_)
 import Database.PostgreSQL.Simple qualified as PG
 import Network.Socket (Family (..), SockAddr (..), SocketType (..), bind, socket, socketPort)
 import Network.Socket qualified as NS
+import Network.Socket.ByteString (recv, sendAll)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -22,6 +27,7 @@ tests = testGroup "Protocol.Integration"
   , testCase "SELECT version() returns a row" testVersion
   , testCase "SELECT current_schema() returns public" testCurrentSchema
   , testCase "SHOW transaction_isolation returns a value" testTxIsolation
+  , testCase "Sync message is answered with ReadyForQuery" testSyncReadyForQuery
   ]
 
 -- | Start a test server on a random port, run the action, then stop.
@@ -55,23 +61,23 @@ testConnectInfo port = defaultConnectInfo
 
 withConn :: Int -> (PG.Connection -> IO a) -> IO a
 withConn port action =
-  bracket (connect (testConnectInfo port)) PG.close action
+  bracket (PG.connect (testConnectInfo port)) PG.close action
 
 testConnect :: Assertion
 testConnect = withTestServer [] $ \port -> do
-  result <- try (connect (testConnectInfo port)) :: IO (Either SomeException PG.Connection)
+  result <- try (PG.connect (testConnectInfo port)) :: IO (Either SomeException PG.Connection)
   case result of
     Left err -> assertFailure ("Connection failed: " <> show err)
     Right conn -> PG.close conn
 
 testTerminate :: Assertion
 testTerminate = withTestServer [] $ \port -> do
-  conn <- connect (testConnectInfo port)
+  conn <- PG.connect (testConnectInfo port)
   PG.close conn
 
 testVersion :: Assertion
 testVersion = withTestServer [] $ \port -> do
-  conn <- connect (testConnectInfo port)
+  conn <- PG.connect (testConnectInfo port)
   rows <- query_ conn "SELECT version()" :: IO [Only String]
   PG.close conn
   case rows of
@@ -81,7 +87,7 @@ testVersion = withTestServer [] $ \port -> do
 
 testCurrentSchema :: Assertion
 testCurrentSchema = withTestServer [] $ \port -> do
-  conn <- connect (testConnectInfo port)
+  conn <- PG.connect (testConnectInfo port)
   rows <- query_ conn "SELECT current_schema()" :: IO [Only String]
   PG.close conn
   case rows of
@@ -90,12 +96,70 @@ testCurrentSchema = withTestServer [] $ \port -> do
 
 testTxIsolation :: Assertion
 testTxIsolation = withTestServer [] $ \port -> do
-  conn <- connect (testConnectInfo port)
+  conn <- PG.connect (testConnectInfo port)
   rows <- query_ conn "SHOW transaction_isolation" :: IO [Only String]
   PG.close conn
   case rows of
     [Only _] -> pure ()  -- any value is fine
     _        -> assertFailure ("expected 1 row, got: " <> show (length rows))
+
+-- | Send a Sync message (0x53) over a raw socket after startup handshake,
+-- and assert the server responds with ReadyForQuery (0x5A), not ErrorResponse.
+testSyncReadyForQuery :: Assertion
+testSyncReadyForQuery = withTestServer [] $ \port -> do
+  bracket (rawConnect port) NS.close $ \sock -> do
+    -- Perform startup handshake
+    sendAll sock startupMsg
+    _handshake <- recvUntilReady sock
+    -- Send Sync (0x53, length 4)
+    sendAll sock syncMsg
+    resp <- recv sock 1
+    BS.index resp 0 @?= 0x5A  -- 'Z' = ReadyForQuery
+
+-- | Build a minimal startup message for the raw socket test
+startupMsg :: ByteString
+startupMsg = BL.toStrict $ runPut $ do
+  let body = BL.toStrict $ runPut $ do
+        putInt32be 196608  -- protocol 3.0
+        putByteString "user" >> putWord8 0
+        putByteString "rawtest" >> putWord8 0
+        putWord8 0
+  putInt32be (fromIntegral (4 + BS.length body))
+  putByteString body
+
+-- | Sync message: type byte 0x53 + int32 length 4 (no payload)
+syncMsg :: ByteString
+syncMsg = BL.toStrict $ runPut $ do
+  putWord8 0x53
+  putInt32be 4
+
+-- | Open a raw TCP socket to the test server
+rawConnect :: Int -> IO NS.Socket
+rawConnect port = do
+  sock <- NS.socket NS.AF_INET NS.Stream 0
+  NS.connect sock (NS.SockAddrInet (fromIntegral port) (NS.tupleToHostAddress (127,0,0,1)))
+  pure sock
+
+-- | Consume backend messages until we see a ReadyForQuery byte (0x5A)
+recvUntilReady :: NS.Socket -> IO ()
+recvUntilReady sock = do
+  hdr <- recv sock 1
+  if BS.null hdr
+    then pure ()
+    else do
+      lenBytes <- recv sock 4
+      let msgLen = readInt32BE lenBytes
+      _payload <- recv sock (msgLen - 4)
+      if BS.index hdr 0 == 0x5A
+        then pure ()
+        else recvUntilReady sock
+
+readInt32BE :: ByteString -> Int
+readInt32BE bs =
+  fromIntegral (BS.index bs 0) * 16777216
+  + fromIntegral (BS.index bs 1) * 65536
+  + fromIntegral (BS.index bs 2) * 256
+  + fromIntegral (BS.index bs 3)
 
 -- Helpers
 startsWith :: String -> String -> Bool

@@ -47,5 +47,6 @@ data BackendMessage
 data FrontendMessage
   = StartupMessage Int32 [(Text, Text)]  -- protocol version, params
   | Query Text                           -- simple query
+  | Sync                                 -- extended-protocol pipeline flush
   | Terminate
   deriving (Eq, Show)

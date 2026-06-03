@@ -81,6 +81,9 @@ messageLoop' tables sock headerBytes = do
       sendError sock (internalError ("decode error: " <> err))
       messageLoop tables sock
     Right Terminate -> pure ()
+    Right Sync -> do
+      sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
+      messageLoop tables sock
     Right (Query sql) -> do
       case handleCatalogQuery sql of
         Just msgs ->
