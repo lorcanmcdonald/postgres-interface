@@ -7,6 +7,7 @@ import Sql.PlanSpec qualified
 import QueryableSpec qualified
 import EndToEndSpec qualified
 import TableSpec qualified
+import K8sSpec qualified
 
 main :: IO ()
 main = defaultMain $ testGroup "postgres-interface"
@@ -16,4 +17,5 @@ main = defaultMain $ testGroup "postgres-interface"
   , QueryableSpec.tests
   , EndToEndSpec.tests
   , TableSpec.tests
+  , K8sSpec.tests
   ]

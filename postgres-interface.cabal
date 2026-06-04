@@ -31,6 +31,7 @@ library
     Database.PostgresInterface.Table
     Database.PostgresInterface.Table.Pushdown
     Database.PostgresInterface.Serve
+    Database.PostgresInterface.K8s
   build-depends:
       base              ^>=4.18 || ^>=4.19 || ^>=4.20
     , bytestring        >= 0.11
@@ -44,6 +45,8 @@ library
     , scientific        >= 0.3
     , int-cast          >= 0.2
     , containers        >= 0.6
+    , aeson             >= 2.0
+    , yaml              >= 0.11
 
 executable example
   import:           warnings
@@ -70,6 +73,7 @@ test-suite postgres-interface-test
     QueryableSpec
     EndToEndSpec
     TableSpec
+    K8sSpec
   build-depends:
       base
     , postgres-interface
@@ -86,3 +90,5 @@ test-suite postgres-interface-test
     , scientific
     , conduit
     , binary
+    , aeson             >= 2.0
+    , yaml              >= 0.11
