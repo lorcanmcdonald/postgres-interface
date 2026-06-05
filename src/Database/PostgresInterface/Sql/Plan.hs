@@ -17,6 +17,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (Day)
 import Data.Time.Format (parseTimeM, defaultTimeLocale)
+import Control.Applicative (asum)
 import Database.PostgresInterface.Sql.Parse (SqlAst)
 import Language.SQL.SimpleSQL.Syntax hiding (Asc, Desc, SortSpec)
 import Language.SQL.SimpleSQL.Syntax qualified as SSS
@@ -124,6 +125,11 @@ extractPredicate (BinOp (Iden names) [Name _ op] rhs) = do
   literal <- extractLiteral rhs
   pure (ColOp col compOp literal)
 extractPredicate (Parens e) = extractPredicate e
+extractPredicate (SpecialOp [Name _ "between"] [Iden names, lo, hi]) = do
+  col   <- Right (namesToText names)
+  loLit <- extractLiteral lo
+  hiLit <- extractLiteral hi
+  pure (And (ColOp col Ge loLit) (ColOp col Le hiLit))
 extractPredicate expr =
   Left (UnsupportedSyntax ("unsupported predicate: " <> T.pack (show expr)))
 
@@ -139,9 +145,15 @@ parseCompOp op   = Left (UnsupportedSyntax ("unsupported operator: " <> op))
 
 extractLiteral :: ScalarExpr -> Either QueryError ScalarLiteral
 extractLiteral (StringLit _ _ val) =
-  case parseTimeM True defaultTimeLocale "%Y-%m-%d" (T.unpack val) of
+  case asum (map (\fmt -> parseTimeM True defaultTimeLocale fmt (T.unpack val)) dateFormats) of
     Just d  -> Right (LitDate d)
     Nothing -> Right (LitText val)
+  where
+    dateFormats =
+      [ "%Y-%m-%d"
+      , "%Y-%m-%dT%H:%M:%S%QZ"
+      , "%Y-%m-%dT%H:%M:%SZ"
+      ]
 extractLiteral (NumLit n) =
   case reads (T.unpack n) of
     [(i, "")] -> Right (LitNum (fromIntegral (i :: Int)))
