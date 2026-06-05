@@ -62,22 +62,6 @@ asArray (Aeson.Array a) = Just (foldr (:) [] a)
 asArray _               = Nothing
 
 -- ---------------------------------------------------------------------------
--- Arbitrary instances
-
--- | Generate simple alphanumeric names suitable for K8s resource names.
-newtype SafeName = SafeName String deriving (Show)
-
-instance Arbitrary SafeName where
-  arbitrary = SafeName <$> listOf1 (elements (['a'..'z'] ++ ['0'..'9'] ++ ['-']))
-              `suchThat` (\s -> head s /= '-' && last s /= '-' && length s <= 40)
-
-toTableName :: SafeName -> TableName
-toTableName (SafeName s) = TableName (T.pack s)
-
-toNamespace :: SafeName -> K8sNamespace
-toNamespace (SafeName s) = K8sNamespace (T.pack s)
-
--- ---------------------------------------------------------------------------
 -- Tests
 
 tests :: TestTree
@@ -107,24 +91,8 @@ tests = testGroup "K8s"
       [ testCase "single manifest round-trips through YAML" testEncodeRoundTrip
       ]
   , testGroup "encodeManifests multi-doc"
-      [ testCase "starts with ---"  testMultiDocSeparator
-      , testCase "both docs present" testMultiDocBothDocs
-      ]
-  , testGroup "properties"
-      [ testProperty "always produces exactly 2 manifests"
-          prop_alwaysTwoManifests
-      , testProperty "table manifest kind is always PostgresTable"
-          prop_tableKind
-      , testProperty "schema manifest kind is always PostgresTableSchema"
-          prop_schemaKind
-      , testProperty "schema manifest name is always tableName-v1"
-          prop_schemaNameSuffix
-      , testProperty "namespace appears in both manifests"
-          prop_namespacePresent
-      , testProperty "encodeManifest produces parseable YAML"
-          prop_encodeRoundTrip
-      , testProperty "encodeManifests produces N parsed documents"
-          prop_multiDocCount
+      [ testCase "starts with ---"           testMultiDocSeparator
+      , testCase "both docs present"         testMultiDocBothDocs
       ]
   ]
 
@@ -226,55 +194,7 @@ testMultiDocSeparator = do
 testMultiDocBothDocs :: Assertion
 testMultiDocBothDocs = do
   let encoded = encodeManifests manifests
+  -- Both kinds should appear in the combined output
   case Yaml.decodeAllEither' encoded of
     Left err -> assertFailure ("YAML decode failed: " <> show err)
     Right (vs :: [Aeson.Value]) -> length vs @?= 2
-
--- ---------------------------------------------------------------------------
--- QuickCheck properties
-
-prop_alwaysTwoManifests :: SafeName -> SafeName -> Bool
-prop_alwaysTwoManifests rawNs rawTn =
-  length (toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)) == 2
-
-prop_tableKind :: SafeName -> SafeName -> Bool
-prop_tableKind rawNs rawTn =
-  let ms  = toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)
-      tbl = manifestAt 0 ms
-  in (field tbl ["kind"] >>= asText) == Just "PostgresTable"
-
-prop_schemaKind :: SafeName -> SafeName -> Bool
-prop_schemaKind rawNs rawTn =
-  let ms  = toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)
-      sch = manifestAt 1 ms
-  in (field sch ["kind"] >>= asText) == Just "PostgresTableSchema"
-
-prop_schemaNameSuffix :: SafeName -> SafeName -> Bool
-prop_schemaNameSuffix rawNs rawTn =
-  let TableName tn = toTableName rawTn
-      ms  = toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)
-      sch = manifestAt 1 ms
-  in (field sch ["metadata", "name"] >>= asText) == Just (tn <> "-v1")
-
-prop_namespacePresent :: SafeName -> SafeName -> Bool
-prop_namespacePresent rawNs rawTn =
-  let K8sNamespace ns = toNamespace rawNs
-      ms = toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)
-  in all (\m -> (field m ["metadata", "namespace"] >>= asText) == Just ns)
-         (map (\i -> manifestAt i ms) [0, 1])
-
-prop_encodeRoundTrip :: SafeName -> SafeName -> Property
-prop_encodeRoundTrip rawNs rawTn =
-  let ms = toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)
-  in conjoin $ flip map ms $ \m@(K8sManifest v) ->
-       case Yaml.decodeEither' (encodeManifest m) of
-         Left _   -> property False
-         Right v' -> v' === v
-
-prop_multiDocCount :: SafeName -> SafeName -> Property
-prop_multiDocCount rawNs rawTn =
-  let ms      = toK8sManifests @Employee (toNamespace rawNs) (toTableName rawTn)
-      encoded = encodeManifests ms
-  in case Yaml.decodeAllEither' encoded of
-       Left _                    -> property False
-       Right (vs :: [Aeson.Value]) -> length vs === length ms

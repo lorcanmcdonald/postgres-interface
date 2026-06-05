@@ -103,7 +103,7 @@ messageLoop' tables sock ext headerBytes = do
       loop
 
     Right (Query sql) -> do
-      case handleCatalogQuery sql of
+      case handleCatalogQuery tables sql of
         Just msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
         Nothing   -> handleUserQuery tables sock sql
       sendAll sock (encodeBackendMessage (ReadyForQuery Idle))
@@ -141,7 +141,7 @@ messageLoop' tables sock ext headerBytes = do
         Nothing  -> sendError sock (PgError SeverityError "34000"
                       ("portal \"" <> portal <> "\" does not exist"))
         Just sql ->
-          case handleCatalogQuery sql of
+          case handleCatalogQuery tables sql of
             Just msgs -> mapM_ (sendAll sock . encodeBackendMessage) (stripRowDescription msgs)
             Nothing   -> handleExecuteQuery tables sock sql
       loop
