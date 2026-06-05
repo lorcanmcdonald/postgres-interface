@@ -11,6 +11,7 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.Int (Int32)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (Day)
 import Data.Yaml qualified as Yaml
 import GHC.Generics (Generic)
@@ -19,6 +20,7 @@ import Database.PostgresInterface.Queryable
 import Database.PostgresInterface.Queryable.Generic ()
 import Test.Tasty
 import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck
 
 -- ---------------------------------------------------------------------------
 -- Test types
@@ -76,14 +78,14 @@ tests = testGroup "K8s"
       , testCase "spec.pgSchema is public"    testTablePgSchema
       ]
   , testGroup "PostgresTableSchema manifest"
-      [ testCase "apiVersion is correct"            testSchemaApiVersion
-      , testCase "kind is PostgresTableSchema"      testSchemaKind
-      , testCase "metadata.name is tableName-v1"    testSchemaMetaName
-      , testCase "spec.tableRef.name matches"       testSchemaTableRef
-      , testCase "spec.version is 1"                testSchemaVersion
+      [ testCase "apiVersion is correct"              testSchemaApiVersion
+      , testCase "kind is PostgresTableSchema"        testSchemaKind
+      , testCase "metadata.name is tableName-v1"      testSchemaMetaName
+      , testCase "spec.tableRef.name matches"         testSchemaTableRef
+      , testCase "spec.version is 1"                  testSchemaVersion
       , testCase "spec.columns length matches schema" testSchemaColumnCount
-      , testCase "column names match schema"        testSchemaColumnNames
-      , testCase "column types are mapped"          testSchemaColumnTypes
+      , testCase "column names match schema"          testSchemaColumnNames
+      , testCase "column types are mapped"            testSchemaColumnTypes
       ]
   , testGroup "encodeManifest produces valid YAML"
       [ testCase "single manifest round-trips through YAML" testEncodeRoundTrip
@@ -101,7 +103,7 @@ tNs :: K8sNamespace
 tNs = "production"
 
 manifests :: [K8sManifest]
-manifests = toK8sManifests @Employee tName tNs
+manifests = toK8sManifests @Employee tNs tName
 
 tableManifest :: Aeson.Value
 tableManifest = manifestAt 0 manifests
@@ -181,8 +183,8 @@ testEncodeRoundTrip = do
   let K8sManifest v = head manifests
       encoded       = encodeManifest (head manifests)
   case Yaml.decodeEither' encoded of
-    Left err  -> assertFailure ("YAML decode failed: " <> show err)
-    Right v'  -> v' @?= v
+    Left err -> assertFailure ("YAML decode failed: " <> show err)
+    Right v' -> v' @?= v
 
 testMultiDocSeparator :: Assertion
 testMultiDocSeparator = do

@@ -27,7 +27,7 @@
 --
 -- writeFiles :: IO ()
 -- writeFiles = do
---   let manifests = toK8sManifests \@Employee (TableName "employees") (K8sNamespace "default")
+--   let manifests = toK8sManifests \@Employee (K8sNamespace "default") (TableName "employees")
 --   mapM_ (\\(i, m) -> BS.writeFile ("manifest-" <> show i <> ".yaml") (encodeManifest m))
 --         (zip [0 ..] manifests)
 -- @
@@ -81,10 +81,10 @@ newtype K8sManifest = K8sManifest Aeson.Value
 -- instance ToK8sManifests MyTable
 -- @
 class Queryable a => ToK8sManifests a where
-  toK8sManifests :: TableName -> K8sNamespace -> [K8sManifest]
-  toK8sManifests tName ns =
-    [ postgresTableManifest tName ns
-    , postgresTableSchemaManifest tName ns (schema @a)
+  toK8sManifests :: K8sNamespace -> TableName -> [K8sManifest]
+  toK8sManifests ns tName =
+    [ postgresTableManifest ns tName
+    , postgresTableSchemaManifest ns tName (schema @a)
     ]
 
 -- ---------------------------------------------------------------------------
@@ -102,8 +102,8 @@ encodeManifests = foldMap (\m -> "---\n" <> encodeManifest m)
 -- ---------------------------------------------------------------------------
 -- Manifest builders
 
-postgresTableManifest :: TableName -> K8sNamespace -> K8sManifest
-postgresTableManifest (TableName tName) (K8sNamespace ns) =
+postgresTableManifest :: K8sNamespace -> TableName -> K8sManifest
+postgresTableManifest (K8sNamespace ns) (TableName tName) =
   K8sManifest $ Aeson.object
     [ "apiVersion" .= ("postgres.scamall.io/v1alpha1" :: Text)
     , "kind"       .= ("PostgresTable" :: Text)
@@ -119,8 +119,8 @@ postgresTableManifest (TableName tName) (K8sNamespace ns) =
     ]
 
 postgresTableSchemaManifest
-  :: TableName -> K8sNamespace -> [(Text, ColumnType)] -> K8sManifest
-postgresTableSchemaManifest (TableName tName) (K8sNamespace ns) cols =
+  :: K8sNamespace -> TableName -> [(Text, ColumnType)] -> K8sManifest
+postgresTableSchemaManifest (K8sNamespace ns) (TableName tName) cols =
   K8sManifest $ Aeson.object
     [ "apiVersion" .= ("postgres.scamall.io/v1alpha1" :: Text)
     , "kind"       .= ("PostgresTableSchema" :: Text)
