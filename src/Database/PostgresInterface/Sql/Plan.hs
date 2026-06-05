@@ -16,6 +16,7 @@ import Data.Scientific (Scientific, toRealFloat)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (Day)
+import Data.Time.Format (parseTimeM, defaultTimeLocale)
 import Database.PostgresInterface.Sql.Parse (SqlAst)
 import Language.SQL.SimpleSQL.Syntax hiding (Asc, Desc, SortSpec)
 import Language.SQL.SimpleSQL.Syntax qualified as SSS
@@ -137,7 +138,10 @@ parseCompOp ">=" = Right Ge
 parseCompOp op   = Left (UnsupportedSyntax ("unsupported operator: " <> op))
 
 extractLiteral :: ScalarExpr -> Either QueryError ScalarLiteral
-extractLiteral (StringLit _ _ val) = Right (LitText val)
+extractLiteral (StringLit _ _ val) =
+  case parseTimeM True defaultTimeLocale "%Y-%m-%d" (T.unpack val) of
+    Just d  -> Right (LitDate d)
+    Nothing -> Right (LitText val)
 extractLiteral (NumLit n) =
   case reads (T.unpack n) of
     [(i, "")] -> Right (LitNum (fromIntegral (i :: Int)))
