@@ -15,9 +15,9 @@ module Database.PostgresInterface.Sql.Plan
 import Data.Scientific (Scientific, toRealFloat)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (Day)
-import Data.Time.Format (parseTimeM, defaultTimeLocale)
-import Control.Applicative (asum)
+import Data.Foldable (asum)
+import Data.Time (Day, LocalTime (..), UTCTime (..))
+import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Database.PostgresInterface.Sql.Parse (SqlAst)
 import Language.SQL.SimpleSQL.Syntax hiding (Asc, Desc, SortSpec)
 import Language.SQL.SimpleSQL.Syntax qualified as SSS
@@ -145,21 +145,24 @@ parseCompOp op   = Left (UnsupportedSyntax ("unsupported operator: " <> op))
 
 extractLiteral :: ScalarExpr -> Either QueryError ScalarLiteral
 extractLiteral (StringLit _ _ val) =
-  case asum (map (\fmt -> parseTimeM True defaultTimeLocale fmt (T.unpack val)) dateFormats) of
+  case parseIsoDate (T.unpack val) of
     Just d  -> Right (LitDate d)
     Nothing -> Right (LitText val)
-  where
-    dateFormats =
-      [ "%Y-%m-%d"
-      , "%Y-%m-%dT%H:%M:%S%QZ"
-      , "%Y-%m-%dT%H:%M:%SZ"
-      ]
 extractLiteral (NumLit n) =
   case reads (T.unpack n) of
     [(i, "")] -> Right (LitNum (fromIntegral (i :: Int)))
     _         -> Left (UnsupportedSyntax ("cannot parse numeric literal: " <> n))
 extractLiteral expr =
   Left (UnsupportedSyntax ("unsupported literal: " <> T.pack (show expr)))
+
+-- | Try to extract a 'Day' from an ISO 8601 string, accepting any valid
+-- combination of date, local datetime, or UTC datetime.
+parseIsoDate :: String -> Maybe Day
+parseIsoDate s = asum
+  [ utctDay  <$> (iso8601ParseM s :: Maybe UTCTime)
+  , localDay <$> (iso8601ParseM s :: Maybe LocalTime)
+  ,               iso8601ParseM s :: Maybe Day
+  ]
 
 -- ORDER BY extraction ---------------------------------------------------------
 
