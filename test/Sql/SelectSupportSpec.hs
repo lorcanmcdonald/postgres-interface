@@ -70,10 +70,10 @@ tests = testGroup "Sql.SelectSupport"
     [ testCase "ILIKE"        $ assertUnsupported "SELECT * FROM t WHERE name ILIKE '%foo%'"
     ]
 
-  , testGroup "not supported: FROM clause"
-    [ testCase "JOIN"         $ assertUnsupported "SELECT * FROM t JOIN u ON t.id = u.id"
-    , testCase "subquery"     $ assertUnsupported "SELECT * FROM (SELECT * FROM t) sub"
-    , testCase "multiple tables" $ assertUnsupported "SELECT * FROM t, u"
+  , testGroup "supported: FROM clause"
+    [ testCase "JOIN"            $ assertSupported "SELECT * FROM t JOIN u ON t.id = u.id"
+    , testCase "subquery"        $ assertSupported "SELECT * FROM (SELECT * FROM t) sub"
+    , testCase "multiple tables" $ assertSupported "SELECT * FROM t, u"
     ]
 
   -- Aggregate functions and arithmetic expressions are parsed successfully

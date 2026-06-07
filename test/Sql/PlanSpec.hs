@@ -102,7 +102,7 @@ testSelectStar :: Assertion
 testSelectStar = do
   p <- runPlan "SELECT * FROM line_items"
   qpColumns p @?= AllColumns
-  qpTable   p @?= "line_items"
+  qpFrom    p @?= [TableRef "line_items" Nothing]
 
 testSelectCol :: Assertion
 testSelectCol = do
@@ -147,4 +147,4 @@ testWhereAnd = do
 testTableName :: Assertion
 testTableName = do
   p <- runPlan "SELECT * FROM my_table"
-  qpTable p @?= "my_table"
+  qpFrom p @?= [TableRef "my_table" Nothing]

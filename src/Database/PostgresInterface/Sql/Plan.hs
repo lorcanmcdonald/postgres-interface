@@ -3,6 +3,7 @@
 module Database.PostgresInterface.Sql.Plan
   ( QueryPlan (..)
   , ColumnSelection (..)
+  , TableSource (..)
   , Predicate (..)
   , CompOp (..)
   , ScalarLiteral (..)
@@ -45,8 +46,15 @@ data ScalarLiteral
   | LitNum     Scientific
   deriving (Eq, Show)
 
+-- | A single source in the FROM clause.
+data TableSource
+  = TableRef ColumnName (Maybe ColumnName)  -- ^ table [AS alias]
+  | Subquery QueryPlan  ColumnName          -- ^ (SELECT ...) AS alias
+  deriving (Eq, Show)
+
 data Predicate
   = ColOp     ColumnName CompOp ScalarLiteral
+  | ColCmpCol ColumnName CompOp ColumnName   -- ^ col op col (e.g. JOIN ON t.id = u.id)
   | Like      ColumnName Text              -- ^ col LIKE pattern  (% and _ wildcards)
   | ILike     ColumnName Text              -- ^ col ILIKE pattern (case-insensitive)
   | IsNull    ColumnName
@@ -59,9 +67,9 @@ data Predicate
   deriving (Eq, Show)
 
 data QueryPlan = QueryPlan
-  { qpTable      :: ColumnName
+  { qpFrom      :: [TableSource]                   -- ^ table sources (cross joined for multiple)
   , qpColumns    :: ColumnSelection
-  , qpAliases    :: [(ColumnName, ColumnName)]  -- ^ (original column name, output alias)
+  , qpAliases    :: [(ColumnName, ColumnName)]      -- ^ (original column name, output alias)
   , qpPredicates :: [Predicate]
   , qpOrderBy    :: [SortSpec]
   , qpLimit      :: Maybe Int
@@ -88,17 +96,17 @@ toQueryPlan _                        = Left (UnsupportedSyntax "only SELECT stat
 
 toQueryPlanSelect :: QueryExpr -> Either QueryError QueryPlan
 toQueryPlanSelect (Select _ selectList from mWhere groupBy _ orderBy _ mLimit) = do
-  tableName        <- extractTable from
-  (cols, aliases)  <- extractColumns selectList
-  preds            <- maybe (Right []) (\w -> (:[]) <$> extractPredicate w) mWhere
-  sorts            <- mapM extractSort orderBy
-  limit            <- mapM extractLimit mLimit
-  groups           <- mapM extractGroupCol groupBy
+  (srcs, fromPreds) <- extractFrom from
+  (cols, aliases)   <- extractColumns selectList
+  wherePreds        <- maybe (Right []) (\w -> (:[]) <$> extractPredicate w) mWhere
+  sorts             <- mapM extractSort orderBy
+  limit             <- mapM extractLimit mLimit
+  groups            <- mapM extractGroupCol groupBy
   pure QueryPlan
-    { qpTable      = tableName
+    { qpFrom       = srcs
     , qpColumns    = cols
     , qpAliases    = aliases
-    , qpPredicates = preds
+    , qpPredicates = fromPreds ++ wherePreds
     , qpOrderBy    = sorts
     , qpLimit      = limit
     , qpGroupBy    = groups
@@ -106,14 +114,33 @@ toQueryPlanSelect (Select _ selectList from mWhere groupBy _ orderBy _ mLimit) =
 toQueryPlanSelect _ =
   Left (UnsupportedSyntax "only SELECT statements are supported")
 
--- Table extraction ------------------------------------------------------------
+-- FROM extraction -------------------------------------------------------------
 
-extractTable :: [TableRef] -> Either QueryError ColumnName
-extractTable [TRSimple names] = Right (namesToText names)
-extractTable [TRAlias (TRSimple names) _] = Right (namesToText names)
-extractTable []  = Left (UnsupportedSyntax "no FROM clause")
-extractTable [_] = Left (UnsupportedSyntax "unsupported FROM clause (JOINs, subqueries not supported)")
-extractTable _   = Left (UnsupportedSyntax "multiple tables in FROM not supported")
+extractFrom :: [TableRef] -> Either QueryError ([TableSource], [Predicate])
+extractFrom [] = Left (UnsupportedSyntax "no FROM clause")
+extractFrom refs = do
+  pairs <- mapM extractFromRef refs
+  pure (concatMap fst pairs, concatMap snd pairs)
+
+extractFromRef :: TableRef -> Either QueryError ([TableSource], [Predicate])
+extractFromRef (TRSimple names) =
+  Right ([TableRef (namesToText names) Nothing], [])
+extractFromRef (TRAlias (TRSimple names) (Alias (Name _ alias) _)) =
+  Right ([TableRef (namesToText names) (Just alias)], [])
+extractFromRef (TRAlias (TRQueryExpr qe) (Alias (Name _ alias) _)) = do
+  innerPlan <- toQueryPlanSelect qe
+  pure ([Subquery innerPlan alias], [])
+extractFromRef (TRJoin lhs _ _ rhs cond) = do
+  (lhsSrcs, lhsPreds) <- extractFromRef lhs
+  (rhsSrcs, rhsPreds) <- extractFromRef rhs
+  condPreds <- case cond of
+    Nothing             -> Right []
+    Just (JoinOn e)     -> (:[]) <$> extractPredicate e
+    Just (JoinUsing _)  -> Left (UnsupportedSyntax "JOIN USING not supported")
+  pure (lhsSrcs ++ rhsSrcs, lhsPreds ++ rhsPreds ++ condPreds)
+extractFromRef (TRParens ref) = extractFromRef ref
+extractFromRef ref =
+  Left (UnsupportedSyntax ("unsupported FROM clause: " <> T.pack (show ref)))
 
 namesToText :: [Name] -> Text
 namesToText names = T.intercalate "." [n | Name _ n <- names]
@@ -149,10 +176,16 @@ extractPredicate (BinOp lhs [Name _ "and"] rhs) =
   And <$> extractPredicate lhs <*> extractPredicate rhs
 extractPredicate (BinOp lhs [Name _ "or"] rhs) =
   Or <$> extractPredicate lhs <*> extractPredicate rhs
+-- col LIKE / ILIKE — before the generic BinOp case to avoid shadowing
 extractPredicate (BinOp (Iden names) [Name _ "like"] (StringLit _ _ pat)) =
   Right (Like (namesToText names) pat)
 extractPredicate (BinOp (Iden names) [Name _ "ilike"] (StringLit _ _ pat)) =
   Right (ILike (namesToText names) pat)
+-- col op col  (e.g. JOIN ON t.id = u.id) — before col op literal
+extractPredicate (BinOp (Iden lhsNames) [Name _ op] (Iden rhsNames)) = do
+  compOp <- parseCompOp op
+  pure (ColCmpCol (namesToText lhsNames) compOp (namesToText rhsNames))
+-- col op literal
 extractPredicate (BinOp (Iden names) [Name _ op] rhs) = do
   col     <- Right (namesToText names)
   compOp  <- parseCompOp op
