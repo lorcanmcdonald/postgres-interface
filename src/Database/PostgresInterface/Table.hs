@@ -19,7 +19,7 @@ import Conduit (ConduitT, runConduit, yieldMany, (.|))
 import Conduit qualified as C
 import Data.ByteString (ByteString)
 import Data.Int (Int32)
-import Data.List (sortBy)
+import Data.List (sortBy, tails)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -91,12 +91,36 @@ rowMatchesPreds sch preds row =
   in all (evalPred vals) preds
 
 evalPred :: [(Text, ColumnValue)] -> Predicate -> Bool
-evalPred vals (And l r) = evalPred vals l && evalPred vals r
-evalPred vals (Or  l r) = evalPred vals l || evalPred vals r
+evalPred vals (And l r)  = evalPred vals l && evalPred vals r
+evalPred vals (Or  l r)  = evalPred vals l || evalPred vals r
+evalPred vals (Not p)    = not (evalPred vals p)
 evalPred vals (ColOp col op lit) =
   case lookup col vals of
     Nothing  -> False
     Just val -> evalCompOp op val lit
+evalPred vals (Like col pat) =
+  case lookup col vals of
+    Just (PgTextVal t) -> matchLike pat t
+    _                  -> False
+evalPred vals (ILike col pat) =
+  case lookup col vals of
+    Just (PgTextVal t) -> matchLike (T.toLower pat) (T.toLower t)
+    _                  -> False
+evalPred vals (IsNull col) =
+  lookup col vals == Just PgNull
+evalPred vals (IsNotNull col) =
+  case lookup col vals of
+    Nothing      -> False
+    Just PgNull  -> False
+    Just _       -> True
+evalPred vals (ColIn col lits) =
+  case lookup col vals of
+    Nothing  -> False
+    Just val -> any (evalCompOp Eq val) lits
+evalPred vals (ColNotIn col lits) =
+  case lookup col vals of
+    Nothing  -> False
+    Just val -> all (not . evalCompOp Eq val) lits
 
 evalCompOp :: CompOp -> ColumnValue -> ScalarLiteral -> Bool
 evalCompOp op (PgInt4Val a)    (LitInt b)  = applyOp op a (fromIntegral b)
@@ -118,6 +142,18 @@ applyOp Lt a b = a <  b
 applyOp Le a b = a <= b
 applyOp Gt a b = a >  b
 applyOp Ge a b = a >= b
+
+-- | Naive SQL LIKE pattern match.  '%' matches any sequence of characters,
+-- '_' matches exactly one character; all other characters match literally.
+-- O(n²) but correct — suitable for the naive evaluation path.
+matchLike :: Text -> Text -> Bool
+matchLike pat str = go (T.unpack pat) (T.unpack str)
+  where
+    go []        []    = True
+    go ('%' : ps) s    = any (go ps) (tails s)
+    go ('_' : ps) (_:s)= go ps s
+    go (p   : ps) (c:s)= p == c && go ps s
+    go _         _     = False
 
 -- Sorting ---------------------------------------------------------------------
 
@@ -167,7 +203,10 @@ describeTable :: AnyTable -> QueryPlan -> [FieldInfo]
 describeTable (AnyTable tbl) plan =
   let fullSchema   = anyTableSchema tbl
       activeSchema = selectColumns (qpColumns plan) fullSchema
-  in map toFieldInfo activeSchema
+      aliases      = qpAliases plan
+      applyAlias n = maybe n id (lookup n aliases)
+      renamedSchema = [(applyAlias n, ct) | (n, ct) <- activeSchema]
+  in map toFieldInfo renamedSchema
 
 -- | Execute a query plan, returning RowDescription + DataRows + CommandComplete.
 -- Use for the Simple Query protocol where schema is sent inline with results.
