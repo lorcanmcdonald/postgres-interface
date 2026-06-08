@@ -18,7 +18,7 @@ import Conduit (ConduitT, runConduit, yieldMany, (.|))
 import Conduit qualified as C
 import Data.ByteString (ByteString)
 import Data.Int (Int32)
-import Data.List (sortBy, tails)
+import Data.List (find, sortBy, tails)
 import Data.Maybe (fromMaybe)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
@@ -94,18 +94,24 @@ rowMatchesPreds sch preds row =
   let vals = zip (map fst sch) (toRow row)
   in all (evalPred vals) preds
 
--- | Look up a column value by exact name; if not found and the name is
--- unqualified, fall back to a unique suffix match (e.g. "id" matches "t.id").
--- This lets simple predicates work against cross-product rows, which carry
--- both unqualified and qualified names, without requiring the caller to know
--- which prefix applies.
+-- | Case-insensitive lookup in an association list.
+lookupCI :: Text -> [(Text, a)] -> Maybe a
+lookupCI col = fmap snd . find (\(k, _) -> T.toLower k == T.toLower col)
+
+-- | Look up a column value by name (case-insensitive); if not found and the
+-- name is unqualified, fall back to a unique suffix match (e.g. "id" matches
+-- "t.id"). This lets simple predicates work against cross-product rows, which
+-- carry both unqualified and qualified names, without requiring the caller to
+-- know which prefix applies. Case is folded because the SQL parser lowercases
+-- all unquoted identifiers while schema field names use the original Haskell
+-- casing.
 lookupCol :: Text -> [(Text, ColumnValue)] -> Maybe ColumnValue
 lookupCol col vals =
-  case lookup col vals of
+  case lookupCI col vals of
     Just v  -> Just v
     Nothing ->
-      let suffix  = "." <> col
-          matches = [v | (k, v) <- vals, T.isSuffixOf suffix k]
+      let suffix  = "." <> T.toLower col
+          matches = [v | (k, v) <- vals, T.isSuffixOf suffix (T.toLower k)]
       in case matches of
            [v] -> Just v  -- exactly one unambiguous qualified match
            _   -> Nothing
@@ -206,7 +212,7 @@ compareBySpecs sch specs x y =
 
 compareBySpec :: [(Text, ColumnValue)] -> [(Text, ColumnValue)] -> SortSpec -> Ordering
 compareBySpec xVals yVals (SortSpec col dir) =
-  let base = compareColumnValues (lookup col xVals) (lookup col yVals)
+  let base = compareColumnValues (lookupCI col xVals) (lookupCI col yVals)
   in case dir of
        Asc  -> base
        Desc -> flipOrd base
@@ -271,7 +277,9 @@ anyTableSchema _ = schema @b
 
 selectColumns :: ColumnSelection -> Schema -> Schema
 selectColumns AllColumns        sch = sch
-selectColumns (NamedColumns ns) sch = filter (\(n, _) -> n `elem` ns) sch
+selectColumns (NamedColumns ns) sch =
+  let lowerNs = map T.toLower ns
+  in filter (\(n, _) -> T.toLower n `elem` lowerNs) sch
 
 toFieldInfo :: (Text, ColumnType) -> FieldInfo
 toFieldInfo (name, colType) = FieldInfo
