@@ -10,9 +10,6 @@ module Database.PostgresInterface.Table
   , anyTable
   , naiveTable
   , findTable
-  , executeTable
-  , executeTableRows
-  , describeTable
   , executeQuery
   , describeQuery
   ) where
@@ -97,39 +94,55 @@ rowMatchesPreds sch preds row =
   let vals = zip (map fst sch) (toRow row)
   in all (evalPred vals) preds
 
+-- | Look up a column value by exact name; if not found and the name is
+-- unqualified, fall back to a unique suffix match (e.g. "id" matches "t.id").
+-- This lets simple predicates work against cross-product rows, which carry
+-- both unqualified and qualified names, without requiring the caller to know
+-- which prefix applies.
+lookupCol :: Text -> [(Text, ColumnValue)] -> Maybe ColumnValue
+lookupCol col vals =
+  case lookup col vals of
+    Just v  -> Just v
+    Nothing ->
+      let suffix  = "." <> col
+          matches = [v | (k, v) <- vals, T.isSuffixOf suffix k]
+      in case matches of
+           [v] -> Just v  -- exactly one unambiguous qualified match
+           _   -> Nothing
+
 evalPred :: [(Text, ColumnValue)] -> Predicate -> Bool
 evalPred vals (And l r)  = evalPred vals l && evalPred vals r
 evalPred vals (Or  l r)  = evalPred vals l || evalPred vals r
 evalPred vals (Not p)    = not (evalPred vals p)
 evalPred vals (ColOp col op lit) =
-  case lookup col vals of
+  case lookupCol col vals of
     Nothing  -> False
     Just val -> evalCompOp op val lit
 evalPred vals (ColCmpCol col1 op col2) =
-  case (lookup col1 vals, lookup col2 vals) of
+  case (lookupCol col1 vals, lookupCol col2 vals) of
     (Just v1, Just v2) -> evalColCmp op v1 v2
     _                  -> False
 evalPred vals (Like col pat) =
-  case lookup col vals of
+  case lookupCol col vals of
     Just (PgTextVal t) -> matchLike pat t
     _                  -> False
 evalPred vals (ILike col pat) =
-  case lookup col vals of
+  case lookupCol col vals of
     Just (PgTextVal t) -> matchLike (T.toLower pat) (T.toLower t)
     _                  -> False
 evalPred vals (IsNull col) =
-  lookup col vals == Just PgNull
+  lookupCol col vals == Just PgNull
 evalPred vals (IsNotNull col) =
-  case lookup col vals of
+  case lookupCol col vals of
     Nothing      -> False
     Just PgNull  -> False
     Just _       -> True
 evalPred vals (ColIn col lits) =
-  case lookup col vals of
+  case lookupCol col vals of
     Nothing  -> False
     Just val -> any (evalCompOp Eq val) lits
 evalPred vals (ColNotIn col lits) =
-  case lookup col vals of
+  case lookupCol col vals of
     Nothing  -> False
     Just val -> all (not . evalCompOp Eq val) lits
 
@@ -301,7 +314,7 @@ columnTypeOid PgBool    = 16
 -- subqueries, comma-lists) use a naive cross-product.
 -- Returns Left on a planning error (e.g. unknown table).
 executeQuery :: [AnyTable] -> QueryPlan -> IO (Either QueryError [BackendMessage])
-executeQuery tables plan = case qpFrom plan of
+executeQuery tables plan = case qpSources plan of
   [TableRef name _alias] ->
     case findTable name tables of
       Nothing  -> pure (Left (UnknownTable name))
@@ -310,7 +323,7 @@ executeQuery tables plan = case qpFrom plan of
 
 -- | Describe the output schema of any QueryPlan.
 describeQuery :: [AnyTable] -> QueryPlan -> Either QueryError [FieldInfo]
-describeQuery tables plan = case qpFrom plan of
+describeQuery tables plan = case qpSources plan of
   [TableRef name _alias] ->
     case findTable name tables of
       Nothing  -> Left (UnknownTable name)
@@ -337,7 +350,7 @@ executeMultiTable tables plan = do
 
 -- | Collect the combined output schema for all table sources in a plan.
 querySchema :: [AnyTable] -> QueryPlan -> Schema
-querySchema tables plan = concatMap (sourceSchema tables) (qpFrom plan)
+querySchema tables plan = concatMap (sourceSchema tables) (qpSources plan)
 
 sourceSchema :: [AnyTable] -> TableSource -> Schema
 sourceSchema tables (TableRef name _alias) =
@@ -350,7 +363,7 @@ sourceSchema tables (Subquery innerPlan _alias) =
 -- | Execute all table sources and compute the cross product.
 planRows :: [AnyTable] -> QueryPlan -> IO [Row]
 planRows tables plan = do
-  srcRowSets <- mapM (collectSourceRows tables) (qpFrom plan)
+  srcRowSets <- mapM (collectSourceRows tables) (qpSources plan)
   let combined = foldl crossJoin [[]] srcRowSets
       filtered = filter (\r -> all (evalPred r) (qpPredicates plan)) combined
       sorted   = sortByMap (qpOrderBy plan) filtered
@@ -382,7 +395,7 @@ addQualified prefix row =
 -- | Minimal plan for collecting raw rows from one table (no pushdown).
 emptyPlan :: Text -> Maybe Text -> QueryPlan
 emptyPlan name alias = QueryPlan
-  { qpFrom       = [TableRef name alias]
+  { qpSources    = [TableRef name alias]
   , qpColumns    = AllColumns
   , qpAliases    = []
   , qpPredicates = []

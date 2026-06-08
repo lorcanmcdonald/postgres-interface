@@ -67,7 +67,7 @@ data Predicate
   deriving (Eq, Show)
 
 data QueryPlan = QueryPlan
-  { qpFrom      :: [TableSource]                   -- ^ table sources (cross joined for multiple)
+  { qpSources    :: [TableSource]                  -- ^ table sources (cross joined for multiple)
   , qpColumns    :: ColumnSelection
   , qpAliases    :: [(ColumnName, ColumnName)]      -- ^ (original column name, output alias)
   , qpPredicates :: [Predicate]
@@ -103,7 +103,7 @@ toQueryPlanSelect (Select _ selectList from mWhere groupBy _ orderBy _ mLimit) =
   limit             <- mapM extractLimit mLimit
   groups            <- mapM extractGroupCol groupBy
   pure QueryPlan
-    { qpFrom       = srcs
+    { qpSources    = srcs
     , qpColumns    = cols
     , qpAliases    = aliases
     , qpPredicates = fromPreds ++ wherePreds
@@ -202,10 +202,10 @@ extractPredicate (PostfixOp [Name _ "is null"] (Iden names)) =
 extractPredicate (PostfixOp [Name _ "is not null"] (Iden names)) =
   Right (IsNotNull (namesToText names))
 extractPredicate (In False (Iden names) (InList exprs)) = do
-  lits <- mapM extractLiteralStrict exprs
+  lits <- mapM extractLiteral exprs
   pure (ColIn (namesToText names) lits)
 extractPredicate (In True (Iden names) (InList exprs)) = do
-  lits <- mapM extractLiteralStrict exprs
+  lits <- mapM extractLiteral exprs
   pure (ColNotIn (namesToText names) lits)
 extractPredicate (PrefixOp [Name _ "not"] e) =
   Not <$> extractPredicate e
@@ -233,12 +233,6 @@ extractLiteral (NumLit n) =
     _         -> Left (UnsupportedSyntax ("cannot parse numeric literal: " <> n))
 extractLiteral expr =
   Left (UnsupportedSyntax ("unsupported literal: " <> T.pack (show expr)))
-
--- | Like 'extractLiteral' but treats all string literals as text (no ISO date
--- inference). Used for IN-list values where the user is comparing against text.
-extractLiteralStrict :: ScalarExpr -> Either QueryError ScalarLiteral
-extractLiteralStrict (StringLit _ _ val) = Right (LitText val)
-extractLiteralStrict expr                = extractLiteral expr
 
 -- | Try to extract a 'Day' from an ISO 8601 string, accepting any valid
 -- combination of date, local datetime, or UTC datetime.
