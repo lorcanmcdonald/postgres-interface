@@ -16,7 +16,7 @@ import Database.PostgresInterface.Protocol.Encoder (encodeBackendMessage)
 import Database.PostgresInterface.Protocol.Messages
 import Database.PostgresInterface.Sql.Parse (parseSql)
 import Database.PostgresInterface.Sql.Plan (QueryError (..), QueryPlan (..), toQueryPlan)
-import Database.PostgresInterface.Table (AnyTable, findTable, executeTable, executeTableRows, describeTable)
+import Database.PostgresInterface.Table (AnyTable, executeQuery, describeQuery)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Network.Socket (Socket)
@@ -166,9 +166,9 @@ describeSQL tables sql =
       case toQueryPlan ast of
         Left  _    -> Nothing
         Right plan ->
-          case findTable (qpTable plan) tables of
-            Nothing  -> Nothing
-            Just tbl -> Just (describeTable tbl plan)
+          case describeQuery tables plan of
+            Left  _      -> Nothing
+            Right fields -> Just fields
 
 -- | Execute a SQL query for the extended protocol Execute step.
 -- Unlike handleUserQuery, this does NOT send RowDescription — the client
@@ -182,14 +182,14 @@ handleExecuteQuery tables sock sql =
       case toQueryPlan ast of
         Left err ->
           sendError sock (queryErrorToPgError err)
-        Right plan ->
-          case findTable (qpTable plan) tables of
-            Nothing ->
-              sendError sock (PgError SeverityError "42P01"
-                ("relation \"" <> qpTable plan <> "\" does not exist"))
-            Just tbl -> do
-              msgs <- executeTableRows tbl plan
-              mapM_ (sendAll sock . encodeBackendMessage) msgs
+        Right plan -> do
+          result <- executeQuery tables plan
+          case result of
+            Left err   -> sendError sock (queryErrorToPgError err)
+            Right msgs ->
+              -- Strip RowDescription: Execute step must not repeat it
+              mapM_ (sendAll sock . encodeBackendMessage)
+                    (stripRowDescription msgs)
 
 -- | Remove any RowDescription messages from a list of backend messages.
 -- Used in the Execute path: per the protocol, RowDescription is sent by
@@ -209,14 +209,11 @@ handleUserQuery tables sock sql =
       case toQueryPlan ast of
         Left err ->
           sendError sock (queryErrorToPgError err)
-        Right plan ->
-          case findTable (qpTable plan) tables of
-            Nothing ->
-              sendError sock (PgError SeverityError "42P01"
-                ("relation \"" <> qpTable plan <> "\" does not exist"))
-            Just tbl -> do
-              msgs <- executeTable tbl plan
-              mapM_ (sendAll sock . encodeBackendMessage) msgs
+        Right plan -> do
+          result <- executeQuery tables plan
+          case result of
+            Left err   -> sendError sock (queryErrorToPgError err)
+            Right msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
 
 queryErrorToPgError :: QueryError -> PgError
 queryErrorToPgError (UnsupportedOperation msg) = PgError SeverityError "0A000" msg

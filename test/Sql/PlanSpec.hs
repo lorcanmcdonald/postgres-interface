@@ -11,10 +11,10 @@ import Test.Tasty.HUnit
 tests :: TestTree
 tests = testGroup "Sql.Plan"
   [ testGroup "parseSql"
-    [ testCase "parses simple SELECT *"     testParseSelectStar
-    , testCase "parses SELECT with columns" testParseSelectCols
-    , testCase "rejects INSERT"             testRejectInsert
-    , testCase "rejects UPDATE"             testRejectUpdate
+    [ testCase "parses simple SELECT *"       testParseSelectStar
+    , testCase "parses SELECT with columns"   testParseSelectCols
+    , testCase "parses INSERT (plan rejects)" testParseInsert
+    , testCase "parses UPDATE (plan rejects)" testParseUpdate
     ]
   , testGroup "parseSql reserved-word identifiers"
     [ testCase "'date' unquoted in SELECT list"   testDateInSelect
@@ -78,17 +78,23 @@ testParseSelectCols =
     Left err -> assertFailure ("parse failed: " <> err)
     Right _  -> pure ()
 
-testRejectInsert :: Assertion
-testRejectInsert =
+testParseInsert :: Assertion
+testParseInsert =
   case parseSql "INSERT INTO t VALUES (1)" of
-    Left _  -> pure ()
-    Right _ -> assertFailure "expected parse to fail for INSERT"
+    Left err -> assertFailure ("expected parse to succeed, got: " <> err)
+    Right ast -> case toQueryPlan ast of
+      Left (UnsupportedOperation _) -> pure ()
+      Left err -> assertFailure ("expected UnsupportedOperation, got: " <> show err)
+      Right _  -> assertFailure "expected plan to fail"
 
-testRejectUpdate :: Assertion
-testRejectUpdate =
-  case parseSql "UPDATE t SET x = 1" of
-    Left _  -> pure ()
-    Right _ -> assertFailure "expected parse to fail for UPDATE"
+testParseUpdate :: Assertion
+testParseUpdate =
+  case parseSql "UPDATE t SET x = 1 WHERE id = 1" of
+    Left err -> assertFailure ("expected parse to succeed, got: " <> err)
+    Right ast -> case toQueryPlan ast of
+      Left (UnsupportedOperation _) -> pure ()
+      Left err -> assertFailure ("expected UnsupportedOperation, got: " <> show err)
+      Right _  -> assertFailure "expected plan to fail"
 
 -- toQueryPlan tests -----------------------------------------------------------
 
@@ -96,7 +102,7 @@ testSelectStar :: Assertion
 testSelectStar = do
   p <- runPlan "SELECT * FROM line_items"
   qpColumns p @?= AllColumns
-  qpTable   p @?= "line_items"
+  qpSources p @?= [TableRef "line_items" Nothing]
 
 testSelectCol :: Assertion
 testSelectCol = do
@@ -141,4 +147,4 @@ testWhereAnd = do
 testTableName :: Assertion
 testTableName = do
   p <- runPlan "SELECT * FROM my_table"
-  qpTable p @?= "my_table"
+  qpSources p @?= [TableRef "my_table" Nothing]
