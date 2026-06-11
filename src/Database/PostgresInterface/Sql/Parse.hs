@@ -7,11 +7,11 @@ module Database.PostgresInterface.Sql.Parse
 
 import Data.Text (Text)
 import Language.SQL.SimpleSQL.Dialect (Dialect (..), postgres)
-import Language.SQL.SimpleSQL.Parse (parseQueryExpr)
-import Language.SQL.SimpleSQL.Syntax (QueryExpr)
+import Language.SQL.SimpleSQL.Parse (parseStatement)
+import Language.SQL.SimpleSQL.Syntax (Statement)
 
 -- | Re-export the SimpleSQL AST type under our own alias
-type SqlAst = QueryExpr
+type SqlAst = Statement
 
 -- | Dialect based on postgres but with SQL type-name keywords also allowed as
 -- identifiers. This lets columns named 'date', 'time', 'timestamp', etc. appear
@@ -25,9 +25,11 @@ piDialect = postgres
       ]
   }
 
--- | Parse a SQL string into an AST, rejecting non-SELECT statements.
+-- | Parse a SQL string into an AST. Accepts any valid SQL statement;
+-- unsupported statement types (INSERT, UPDATE, DELETE) are rejected later
+-- by 'toQueryPlan' with a "not implemented" error rather than a parse error.
 parseSql :: Text -> Either String SqlAst
 parseSql sql =
-  case parseQueryExpr piDialect "<query>" Nothing sql of
+  case parseStatement piDialect "<query>" Nothing sql of
     Left _err -> Left "SQL parse error"
     Right ast -> Right ast

@@ -19,7 +19,7 @@ import Data.Foldable (asum)
 import Data.Time (Day, LocalTime (..), UTCTime (..))
 import Data.Time.Format.ISO8601 (iso8601ParseM)
 import Database.PostgresInterface.Sql.Parse (SqlAst)
-import Language.SQL.SimpleSQL.Syntax hiding (Asc, Desc, SortSpec)
+import Language.SQL.SimpleSQL.Syntax hiding (Asc, Desc, SortSpec, Statement)
 import Language.SQL.SimpleSQL.Syntax qualified as SSS
 
 type ColumnName = Text
@@ -54,6 +54,7 @@ data Predicate
 data QueryPlan = QueryPlan
   { qpTable      :: ColumnName
   , qpColumns    :: ColumnSelection
+  , qpAliases    :: [(ColumnName, ColumnName)]  -- ^ (original column name, output alias)
   , qpPredicates :: [Predicate]
   , qpOrderBy    :: [SortSpec]
   , qpLimit      :: Maybe Int
@@ -71,22 +72,31 @@ data QueryError
 
 -- | Convert a parsed SQL AST into a QueryPlan, or fail with a QueryError.
 toQueryPlan :: SqlAst -> Either QueryError QueryPlan
-toQueryPlan (Select _ selectList from mWhere groupBy _ orderBy _ mLimit) = do
-  tableName <- extractTable from
-  cols      <- extractColumns selectList
-  preds     <- maybe (Right []) (\w -> (:[]) <$> extractPredicate w) mWhere
-  sorts     <- mapM extractSort orderBy
-  limit     <- mapM extractLimit mLimit
-  groups    <- mapM extractGroupCol groupBy
+toQueryPlan (SSS.SelectStatement qe) = toQueryPlanSelect qe
+toQueryPlan (SSS.Insert {})          = Left (UnsupportedOperation "INSERT is not supported")
+toQueryPlan (SSS.Update {})          = Left (UnsupportedOperation "UPDATE is not supported")
+toQueryPlan (SSS.Delete {})          = Left (UnsupportedOperation "DELETE is not supported")
+toQueryPlan SSS.EmptyStatement       = Left (UnsupportedSyntax "empty statement")
+toQueryPlan _                        = Left (UnsupportedSyntax "only SELECT statements are supported")
+
+toQueryPlanSelect :: QueryExpr -> Either QueryError QueryPlan
+toQueryPlanSelect (Select _ selectList from mWhere groupBy _ orderBy _ mLimit) = do
+  tableName        <- extractTable from
+  (cols, aliases)  <- extractColumns selectList
+  preds            <- maybe (Right []) (\w -> (:[]) <$> extractPredicate w) mWhere
+  sorts            <- mapM extractSort orderBy
+  limit            <- mapM extractLimit mLimit
+  groups           <- mapM extractGroupCol groupBy
   pure QueryPlan
     { qpTable      = tableName
     , qpColumns    = cols
+    , qpAliases    = aliases
     , qpPredicates = preds
     , qpOrderBy    = sorts
     , qpLimit      = limit
     , qpGroupBy    = groups
     }
-toQueryPlan _ =
+toQueryPlanSelect _ =
   Left (UnsupportedSyntax "only SELECT statements are supported")
 
 -- Table extraction ------------------------------------------------------------
@@ -103,14 +113,27 @@ namesToText names = T.intercalate "." [n | Name _ n <- names]
 
 -- Column extraction -----------------------------------------------------------
 
-extractColumns :: [(ScalarExpr, Maybe Name)] -> Either QueryError ColumnSelection
-extractColumns [(Star, _)] = Right AllColumns
-extractColumns cols = NamedColumns <$> mapM extractColName cols
+-- | Returns the column selection and a list of (original, alias) pairs for
+-- columns that have an explicit alias different from their source name.
+extractColumns :: [(ScalarExpr, Maybe Name)] -> Either QueryError (ColumnSelection, [(ColumnName, ColumnName)])
+extractColumns [(Star, _)] = Right (AllColumns, [])
+extractColumns cols = do
+  pairs <- mapM extractColWithAlias cols
+  let names   = map fst pairs
+      aliases = [(orig, alias) | (orig, alias) <- pairs, orig /= alias]
+  pure (NamedColumns names, aliases)
 
-extractColName :: (ScalarExpr, Maybe Name) -> Either QueryError ColumnName
-extractColName (Iden names, _) = Right (namesToText names)
-extractColName (_, Just (Name _ alias)) = Right alias
-extractColName (expr, _) = Left (UnsupportedSyntax ("unsupported column expression: " <> T.pack (show expr)))
+-- | Returns (original column name, output name) — output name is the alias
+-- when one is present, otherwise the original name.
+extractColWithAlias :: (ScalarExpr, Maybe Name) -> Either QueryError (ColumnName, ColumnName)
+extractColWithAlias (Iden names, Just (Name _ alias)) =
+  Right (namesToText names, alias)
+extractColWithAlias (Iden names, Nothing) =
+  let n = namesToText names in Right (n, n)
+extractColWithAlias (_, Just (Name _ alias)) =
+  Right (alias, alias)
+extractColWithAlias (expr, _) =
+  Left (UnsupportedSyntax ("unsupported column expression: " <> T.pack (show expr)))
 
 -- Predicate extraction --------------------------------------------------------
 

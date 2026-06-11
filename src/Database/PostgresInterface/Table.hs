@@ -167,7 +167,10 @@ describeTable :: AnyTable -> QueryPlan -> [FieldInfo]
 describeTable (AnyTable tbl) plan =
   let fullSchema   = anyTableSchema tbl
       activeSchema = selectColumns (qpColumns plan) fullSchema
-  in map toFieldInfo activeSchema
+      aliases      = qpAliases plan
+      applyAlias n = maybe n id (lookup n aliases)
+      renamedSchema = [(applyAlias n, ct) | (n, ct) <- activeSchema]
+  in map toFieldInfo renamedSchema
 
 -- | Execute a query plan, returning RowDescription + DataRows + CommandComplete.
 -- Use for the Simple Query protocol where schema is sent inline with results.
