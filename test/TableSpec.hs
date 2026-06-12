@@ -40,8 +40,9 @@ d y m day = fromGregorian y m day
 
 mkPlan :: [Predicate] -> QueryPlan
 mkPlan preds = QueryPlan
-  { qpTable      = "t"
+  { qpSources    = [TableRef "t" Nothing]
   , qpColumns    = AllColumns
+  , qpAliases    = []
   , qpPredicates = preds
   , qpOrderBy    = []
   , qpLimit      = Nothing

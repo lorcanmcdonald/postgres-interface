@@ -10,16 +10,16 @@ module Database.PostgresInterface.Table
   , anyTable
   , naiveTable
   , findTable
-  , executeTable
-  , executeTableRows
-  , describeTable
+  , executeQuery
+  , describeQuery
   ) where
 
 import Conduit (ConduitT, runConduit, yieldMany, (.|))
 import Conduit qualified as C
 import Data.ByteString (ByteString)
 import Data.Int (Int32)
-import Data.List (sortBy)
+import Data.List (find, sortBy, tails)
+import Data.Maybe (fromMaybe)
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -34,7 +34,14 @@ import Database.PostgresInterface.Sql.Plan
   , ScalarLiteral (..)
   , SortDir (..)
   , SortSpec (..)
+  , TableSource (..)
+  , QueryError (..)
   )
+
+-- A row in the cross-product representation: flat association list of (column, value).
+-- Columns appear both unqualified ("col") and qualified ("table.col") so that
+-- both simple WHERE predicates and qualified JOIN ON predicates resolve correctly.
+type Row = [(Text, ColumnValue)]
 
 data Table a = Table
   { tableName    :: Text
@@ -75,12 +82,9 @@ applyNaivePlan
   -> ConduitT () a IO ()
   -> ConduitT () a IO ()
 applyNaivePlan sch preds sorts lim src = do
-  -- 1. Collect all rows (needed for sort; filter first to reduce memory)
   rows <- C.lift $ runConduit (src .| C.filterC (rowMatchesPreds sch preds) .| C.sinkList)
-  -- 2. Sort (requires materialisation)
-  let sorted = applySort sch sorts rows
-  -- 3. Apply LIMIT and yield
-  let limited = maybe id take lim sorted
+  let sorted  = applySort sch sorts rows
+      limited = maybe id take lim sorted
   yieldMany limited
 
 -- Predicate evaluation --------------------------------------------------------
@@ -90,13 +94,63 @@ rowMatchesPreds sch preds row =
   let vals = zip (map fst sch) (toRow row)
   in all (evalPred vals) preds
 
+-- | Case-insensitive lookup in an association list.
+lookupCI :: Text -> [(Text, a)] -> Maybe a
+lookupCI col = fmap snd . find (\(k, _) -> T.toLower k == T.toLower col)
+
+-- | Look up a column value by name (case-insensitive); if not found and the
+-- name is unqualified, fall back to a unique suffix match (e.g. "id" matches
+-- "t.id"). This lets simple predicates work against cross-product rows, which
+-- carry both unqualified and qualified names, without requiring the caller to
+-- know which prefix applies. Case is folded because the SQL parser lowercases
+-- all unquoted identifiers while schema field names use the original Haskell
+-- casing.
+lookupCol :: Text -> [(Text, ColumnValue)] -> Maybe ColumnValue
+lookupCol col vals =
+  case lookupCI col vals of
+    Just v  -> Just v
+    Nothing ->
+      let suffix  = "." <> T.toLower col
+          matches = [v | (k, v) <- vals, T.isSuffixOf suffix (T.toLower k)]
+      in case matches of
+           [v] -> Just v  -- exactly one unambiguous qualified match
+           _   -> Nothing
+
 evalPred :: [(Text, ColumnValue)] -> Predicate -> Bool
-evalPred vals (And l r) = evalPred vals l && evalPred vals r
-evalPred vals (Or  l r) = evalPred vals l || evalPred vals r
+evalPred vals (And l r)  = evalPred vals l && evalPred vals r
+evalPred vals (Or  l r)  = evalPred vals l || evalPred vals r
+evalPred vals (Not p)    = not (evalPred vals p)
 evalPred vals (ColOp col op lit) =
-  case lookup col vals of
+  case lookupCol col vals of
     Nothing  -> False
     Just val -> evalCompOp op val lit
+evalPred vals (ColCmpCol col1 op col2) =
+  case (lookupCol col1 vals, lookupCol col2 vals) of
+    (Just v1, Just v2) -> evalColCmp op v1 v2
+    _                  -> False
+evalPred vals (Like col pat) =
+  case lookupCol col vals of
+    Just (PgTextVal t) -> matchLike pat t
+    _                  -> False
+evalPred vals (ILike col pat) =
+  case lookupCol col vals of
+    Just (PgTextVal t) -> matchLike (T.toLower pat) (T.toLower t)
+    _                  -> False
+evalPred vals (IsNull col) =
+  lookupCol col vals == Just PgNull
+evalPred vals (IsNotNull col) =
+  case lookupCol col vals of
+    Nothing      -> False
+    Just PgNull  -> False
+    Just _       -> True
+evalPred vals (ColIn col lits) =
+  case lookupCol col vals of
+    Nothing  -> False
+    Just val -> any (evalCompOp Eq val) lits
+evalPred vals (ColNotIn col lits) =
+  case lookupCol col vals of
+    Nothing  -> False
+    Just val -> all (not . evalCompOp Eq val) lits
 
 evalCompOp :: CompOp -> ColumnValue -> ScalarLiteral -> Bool
 evalCompOp op (PgInt4Val a)    (LitInt b)  = applyOp op a (fromIntegral b)
@@ -108,6 +162,19 @@ evalCompOp op (PgTextVal a)    (LitText b) = applyOp op a b
 evalCompOp op (PgDateVal a)    (LitDate b) = applyOp op a b
 evalCompOp _ _ _ = False
 
+-- | Evaluate a comparison between two ColumnValues using the Ordering from
+-- 'compareColumnValues'.
+evalColCmp :: CompOp -> ColumnValue -> ColumnValue -> Bool
+evalColCmp op v1 v2 =
+  let ord = compareColumnValues (Just v1) (Just v2)
+  in case op of
+    Eq -> ord == EQ
+    Ne -> ord /= EQ
+    Lt -> ord == LT
+    Le -> ord /= GT
+    Gt -> ord == GT
+    Ge -> ord /= LT
+
 toScientific :: (Integral a) => a -> Scientific
 toScientific = fromIntegral
 
@@ -118,6 +185,18 @@ applyOp Lt a b = a <  b
 applyOp Le a b = a <= b
 applyOp Gt a b = a >  b
 applyOp Ge a b = a >= b
+
+-- | Naive SQL LIKE pattern match.  '%' matches any sequence of characters,
+-- '_' matches exactly one character; all other characters match literally.
+-- O(n²) but correct — suitable for the naive evaluation path.
+matchLike :: Text -> Text -> Bool
+matchLike pat str = go (T.unpack pat) (T.unpack str)
+  where
+    go []        []    = True
+    go ('%' : ps) s    = any (go ps) (tails s)
+    go ('_' : ps) (_:s)= go ps s
+    go (p   : ps) (c:s)= p == c && go ps s
+    go _         _     = False
 
 -- Sorting ---------------------------------------------------------------------
 
@@ -133,7 +212,7 @@ compareBySpecs sch specs x y =
 
 compareBySpec :: [(Text, ColumnValue)] -> [(Text, ColumnValue)] -> SortSpec -> Ordering
 compareBySpec xVals yVals (SortSpec col dir) =
-  let base = compareColumnValues (lookup col xVals) (lookup col yVals)
+  let base = compareColumnValues (lookupCI col xVals) (lookupCI col yVals)
   in case dir of
        Asc  -> base
        Desc -> flipOrd base
@@ -154,6 +233,8 @@ compareColumnValues Nothing              _                     = LT
 compareColumnValues _                    Nothing               = GT
 compareColumnValues _                    _                     = EQ
 
+-- Table lookup ----------------------------------------------------------------
+
 findTable :: Text -> [AnyTable] -> Maybe AnyTable
 findTable name = foldr check Nothing
   where
@@ -161,28 +242,26 @@ findTable name = foldr check Nothing
       | tableName tbl == name = Just t
       | otherwise             = acc
 
--- | Compute RowDescription field descriptors for a table without executing the query.
--- Used by the extended query protocol Describe handler.
+-- Single-table execution ------------------------------------------------------
+
+-- | Compute RowDescription field descriptors for a single-table query.
 describeTable :: AnyTable -> QueryPlan -> [FieldInfo]
 describeTable (AnyTable tbl) plan =
-  let fullSchema   = anyTableSchema tbl
-      activeSchema = selectColumns (qpColumns plan) fullSchema
-      aliases      = qpAliases plan
-      applyAlias n = maybe n id (lookup n aliases)
+  let fullSchema    = anyTableSchema tbl
+      activeSchema  = selectColumns (qpColumns plan) fullSchema
+      aliases       = qpAliases plan
+      applyAlias n  = fromMaybe n (lookup n aliases)
       renamedSchema = [(applyAlias n, ct) | (n, ct) <- activeSchema]
   in map toFieldInfo renamedSchema
 
--- | Execute a query plan, returning RowDescription + DataRows + CommandComplete.
--- Use for the Simple Query protocol where schema is sent inline with results.
+-- | Execute a single-table query plan (Simple Query protocol: includes RowDescription).
 executeTable :: AnyTable -> QueryPlan -> IO [BackendMessage]
 executeTable tbl plan = do
-  rows <- executeTableRows tbl plan
+  rows   <- executeTableRows tbl plan
   let fields = describeTable tbl plan
   pure $ RowDescription fields : rows
 
--- | Execute a query plan, returning only DataRows + CommandComplete.
--- Use for the Extended Query protocol Execute step: the client already received
--- RowDescription from the preceding Describe step and must not receive it again.
+-- | Execute a single-table query plan (Extended protocol: no RowDescription).
 executeTableRows :: AnyTable -> QueryPlan -> IO [BackendMessage]
 executeTableRows (AnyTable tbl) plan = do
   source <- tableHandler tbl plan
@@ -197,8 +276,10 @@ anyTableSchema :: forall b. Queryable b => Table b -> Schema
 anyTableSchema _ = schema @b
 
 selectColumns :: ColumnSelection -> Schema -> Schema
-selectColumns AllColumns      sch = sch
-selectColumns (NamedColumns ns) sch = filter (\(n, _) -> n `elem` ns) sch
+selectColumns AllColumns        sch = sch
+selectColumns (NamedColumns ns) sch =
+  let lowerNs = map T.toLower ns
+  in filter (\(n, _) -> T.toLower n `elem` lowerNs) sch
 
 toFieldInfo :: (Text, ColumnType) -> FieldInfo
 toFieldInfo (name, colType) = FieldInfo
@@ -233,3 +314,121 @@ columnTypeOid PgInt8    = 20
 columnTypeOid PgNumeric = 1700
 columnTypeOid PgDate    = 1082
 columnTypeOid PgBool    = 16
+
+-- Multi-table (cross-product) execution ---------------------------------------
+
+-- | Execute any QueryPlan against a registry of tables.
+-- Single-table queries use the typed path; multi-table queries (JOINs,
+-- subqueries, comma-lists) use a naive cross-product.
+-- Returns Left on a planning error (e.g. unknown table).
+executeQuery :: [AnyTable] -> QueryPlan -> IO (Either QueryError [BackendMessage])
+executeQuery tables plan = case qpSources plan of
+  [TableRef name _alias] ->
+    case findTable name tables of
+      Nothing  -> pure (Left (UnknownTable name))
+      Just tbl -> Right <$> executeTable tbl plan
+  _ -> Right <$> executeMultiTable tables plan
+
+-- | Describe the output schema of any QueryPlan.
+describeQuery :: [AnyTable] -> QueryPlan -> Either QueryError [FieldInfo]
+describeQuery tables plan = case qpSources plan of
+  [TableRef name _alias] ->
+    case findTable name tables of
+      Nothing  -> Left (UnknownTable name)
+      Just tbl -> Right (describeTable tbl plan)
+  _ ->
+    let sch      = querySchema tables plan
+        selected = selectColumns (qpColumns plan) sch
+        aliases  = qpAliases plan
+        renamed  = [(fromMaybe n (lookup n aliases), t) | (n, t) <- selected]
+    in Right (map toFieldInfo renamed)
+
+executeMultiTable :: [AnyTable] -> QueryPlan -> IO [BackendMessage]
+executeMultiTable tables plan = do
+  rows <- planRows tables plan
+  let sch      = querySchema tables plan
+      selected = selectColumns (qpColumns plan) sch
+      aliases  = qpAliases plan
+      renamed  = [(fromMaybe n (lookup n aliases), t) | (n, t) <- selected]
+      fields   = map toFieldInfo renamed
+      colNames = map fst (selectColumns (qpColumns plan) sch)
+      dataRows = map (mkMapDataRow colNames) rows
+      tag      = "SELECT " <> T.pack (show (length dataRows))
+  pure $ RowDescription fields : dataRows ++ [CommandComplete tag]
+
+-- | Collect the combined output schema for all table sources in a plan.
+querySchema :: [AnyTable] -> QueryPlan -> Schema
+querySchema tables plan = concatMap (sourceSchema tables) (qpSources plan)
+
+sourceSchema :: [AnyTable] -> TableSource -> Schema
+sourceSchema tables (TableRef name _alias) =
+  case findTable name tables of
+    Nothing               -> []
+    Just (AnyTable tbl)   -> anyTableSchema tbl
+sourceSchema tables (Subquery innerPlan _alias) =
+  querySchema tables innerPlan
+
+-- | Execute all table sources and compute the cross product.
+planRows :: [AnyTable] -> QueryPlan -> IO [Row]
+planRows tables plan = do
+  srcRowSets <- mapM (collectSourceRows tables) (qpSources plan)
+  let combined = foldl crossJoin [[]] srcRowSets
+      filtered = filter (\r -> all (evalPred r) (qpPredicates plan)) combined
+      sorted   = sortByMap (qpOrderBy plan) filtered
+  pure (maybe id take (qpLimit plan) sorted)
+
+-- | Collect all rows from a table source as flat association lists.
+-- Each row includes both unqualified names (for WHERE predicates) and
+-- qualified names prefixed with the table name or alias (for JOIN ON).
+collectSourceRows :: [AnyTable] -> TableSource -> IO [Row]
+collectSourceRows tables (TableRef name alias) =
+  case findTable name tables of
+    Nothing -> pure []
+    Just (AnyTable tbl) -> do
+      let prefix  = fromMaybe name alias
+          rawPlan = emptyPlan name alias
+      source <- tableHandler tbl rawPlan
+      rows   <- runConduit (source .| C.sinkList)
+      let sch = anyTableSchema tbl
+      pure [ addQualified prefix (zip (map fst sch) (toRow r)) | r <- rows ]
+collectSourceRows tables (Subquery innerPlan alias) = do
+  rows <- planRows tables innerPlan
+  pure [ addQualified alias row | row <- rows ]
+
+-- | Add qualified (prefix.col) entries alongside the existing unqualified ones.
+addQualified :: Text -> Row -> Row
+addQualified prefix row =
+  row ++ [(prefix <> "." <> col, val) | (col, val) <- row]
+
+-- | Minimal plan for collecting raw rows from one table (no pushdown).
+emptyPlan :: Text -> Maybe Text -> QueryPlan
+emptyPlan name alias = QueryPlan
+  { qpSources    = [TableRef name alias]
+  , qpColumns    = AllColumns
+  , qpAliases    = []
+  , qpPredicates = []
+  , qpOrderBy    = []
+  , qpLimit      = Nothing
+  , qpGroupBy    = []
+  }
+
+crossJoin :: [Row] -> [Row] -> [Row]
+crossJoin rows1 rows2 = [r1 ++ r2 | r1 <- rows1, r2 <- rows2]
+
+sortByMap :: [SortSpec] -> [Row] -> [Row]
+sortByMap []    rows = rows
+sortByMap specs rows = sortBy (compareRowsBySpecs specs) rows
+
+compareRowsBySpecs :: [SortSpec] -> Row -> Row -> Ordering
+compareRowsBySpecs specs r1 r2 = foldMap (compareRowBySpec r1 r2) specs
+
+compareRowBySpec :: Row -> Row -> SortSpec -> Ordering
+compareRowBySpec r1 r2 (SortSpec col dir) =
+  let base = compareColumnValues (lookup col r1) (lookup col r2)
+  in case dir of
+    Asc  -> base
+    Desc -> flipOrd base
+
+mkMapDataRow :: [Text] -> Row -> BackendMessage
+mkMapDataRow cols row =
+  DataRow [encodeValue (fromMaybe PgNull (lookup c row)) | c <- cols]

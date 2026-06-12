@@ -57,20 +57,23 @@ tests = testGroup "Sql.SelectSupport"
         qpColumns p @?= NamedColumns ["date"]
     ]
 
-  , testGroup "not supported: WHERE operators"
-    [ testCase "LIKE"         $ assertUnsupported "SELECT * FROM t WHERE name LIKE '%foo%'"
-    , testCase "ILIKE"        $ assertUnsupported "SELECT * FROM t WHERE name ILIKE '%foo%'"
-    , testCase "IS NULL"      $ assertUnsupported "SELECT * FROM t WHERE col IS NULL"
-    , testCase "IS NOT NULL"  $ assertUnsupported "SELECT * FROM t WHERE col IS NOT NULL"
-    , testCase "IN list"      $ assertUnsupported "SELECT * FROM t WHERE cat IN ('a', 'b', 'c')"
-    , testCase "NOT IN list"  $ assertUnsupported "SELECT * FROM t WHERE cat NOT IN ('a', 'b')"
-    , testCase "NOT predicate"$ assertUnsupported "SELECT * FROM t WHERE NOT a = 'x'"
+  , testGroup "supported: additional WHERE operators"
+    [ testCase "LIKE"         $ assertSupported "SELECT * FROM t WHERE name LIKE '%foo%'"
+    , testCase "IS NULL"      $ assertSupported "SELECT * FROM t WHERE col IS NULL"
+    , testCase "IS NOT NULL"  $ assertSupported "SELECT * FROM t WHERE col IS NOT NULL"
+    , testCase "IN list"      $ assertSupported "SELECT * FROM t WHERE cat IN ('a', 'b', 'c')"
+    , testCase "NOT IN list"  $ assertSupported "SELECT * FROM t WHERE cat NOT IN ('a', 'b')"
+    , testCase "NOT predicate"$ assertSupported "SELECT * FROM t WHERE NOT a = 'x'"
     ]
 
-  , testGroup "not supported: FROM clause"
-    [ testCase "JOIN"         $ assertUnsupported "SELECT * FROM t JOIN u ON t.id = u.id"
-    , testCase "subquery"     $ assertUnsupported "SELECT * FROM (SELECT * FROM t) sub"
-    , testCase "multiple tables" $ assertUnsupported "SELECT * FROM t, u"
+  , testGroup "not supported: WHERE operators"
+    [ testCase "ILIKE"        $ assertUnsupported "SELECT * FROM t WHERE name ILIKE '%foo%'"
+    ]
+
+  , testGroup "supported: FROM clause"
+    [ testCase "JOIN"            $ assertSupported "SELECT * FROM t JOIN u ON t.id = u.id"
+    , testCase "subquery"        $ assertSupported "SELECT * FROM (SELECT * FROM t) sub"
+    , testCase "multiple tables" $ assertSupported "SELECT * FROM t, u"
     ]
 
   -- Aggregate functions and arithmetic expressions are parsed successfully
