@@ -58,16 +58,19 @@ tests = testGroup "Sql.SelectSupport"
     ]
 
   , testGroup "supported: additional WHERE operators"
-    [ testCase "LIKE"         $ assertSupported "SELECT * FROM t WHERE name LIKE '%foo%'"
-    , testCase "IS NULL"      $ assertSupported "SELECT * FROM t WHERE col IS NULL"
-    , testCase "IS NOT NULL"  $ assertSupported "SELECT * FROM t WHERE col IS NOT NULL"
-    , testCase "IN list"      $ assertSupported "SELECT * FROM t WHERE cat IN ('a', 'b', 'c')"
-    , testCase "NOT IN list"  $ assertSupported "SELECT * FROM t WHERE cat NOT IN ('a', 'b')"
-    , testCase "NOT predicate"$ assertSupported "SELECT * FROM t WHERE NOT a = 'x'"
-    ]
-
-  , testGroup "not supported: WHERE operators"
-    [ testCase "ILIKE"        $ assertUnsupported "SELECT * FROM t WHERE name ILIKE '%foo%'"
+    [ testCase "LIKE"            $ assertSupported "SELECT * FROM t WHERE name LIKE '%foo%'"
+    , testCase "ILIKE"           $ assertSupported "SELECT * FROM t WHERE name ILIKE '%foo%'"
+    , testCase "IS NULL"         $ assertSupported "SELECT * FROM t WHERE col IS NULL"
+    , testCase "IS NOT NULL"     $ assertSupported "SELECT * FROM t WHERE col IS NOT NULL"
+    , testCase "IS TRUE"         $ assertSupported "SELECT * FROM t WHERE active IS TRUE"
+    , testCase "IS FALSE"        $ assertSupported "SELECT * FROM t WHERE active IS FALSE"
+    , testCase "IS NOT TRUE"     $ assertSupported "SELECT * FROM t WHERE active IS NOT TRUE"
+    , testCase "IS NOT FALSE"    $ assertSupported "SELECT * FROM t WHERE active IS NOT FALSE"
+    , testCase "IN list"         $ assertSupported "SELECT * FROM t WHERE cat IN ('a', 'b', 'c')"
+    , testCase "NOT IN list"     $ assertSupported "SELECT * FROM t WHERE cat NOT IN ('a', 'b')"
+    , testCase "NOT predicate"   $ assertSupported "SELECT * FROM t WHERE NOT a = 'x'"
+    , testCase "col::type LIKE"  $ assertSupported "SELECT * FROM t WHERE name::text LIKE '%foo%'"
+    , testCase "col::type = lit" $ assertSupported "SELECT * FROM t WHERE amount::int = 5"
     ]
 
   , testGroup "supported: FROM clause"

@@ -136,6 +136,10 @@ evalPred vals (ILike col pat) =
   case lookupCol col vals of
     Just (PgTextVal t) -> matchLike (T.toLower pat) (T.toLower t)
     _                  -> False
+evalPred vals (IsTrue col) =
+  lookupCol col vals == Just (PgBoolVal True)
+evalPred vals (IsFalse col) =
+  lookupCol col vals == Just (PgBoolVal False)
 evalPred vals (IsNull col) =
   lookupCol col vals == Just PgNull
 evalPred vals (IsNotNull col) =

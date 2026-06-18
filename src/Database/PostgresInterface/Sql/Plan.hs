@@ -58,6 +58,8 @@ data Predicate
   | ILike     ColumnName Text                -- ^ col ILIKE pattern (case-insensitive)
   | IsNull    ColumnName
   | IsNotNull ColumnName
+  | IsTrue    ColumnName                     -- ^ col IS TRUE
+  | IsFalse   ColumnName                     -- ^ col IS FALSE
   | ColIn     ColumnName [ScalarLiteral]     -- ^ col IN (...)
   | ColNotIn  ColumnName [ScalarLiteral]     -- ^ col NOT IN (...)
   | Not       Predicate
@@ -247,8 +249,9 @@ extractPredicate (VerbalExprBinOpAExpr lhs negated verb rhs _) = do
     LikeVerbalExprBinOp -> do
       pat <- extractPatternText rhs
       pure (if negated then Not (Like col pat) else Like col pat)
-    IlikeVerbalExprBinOp ->
-      Left (UnsupportedSyntax "ILIKE is not supported")
+    IlikeVerbalExprBinOp -> do
+      pat <- extractPatternText rhs
+      pure (if negated then Not (ILike col pat) else ILike col pat)
     SimilarToVerbalExprBinOp ->
       Left (UnsupportedSyntax "SIMILAR TO is not supported")
 -- IS NULL / IS NOT NULL / IN / NOT IN / BETWEEN — Bool arg is True when negated
@@ -257,6 +260,12 @@ extractPredicate (ReversableOpAExpr expr negated op) =
     NullAExprReversableOp -> do
       col <- extractAExprColName expr
       pure (if negated then IsNotNull col else IsNull col)
+    TrueAExprReversableOp -> do
+      col <- extractAExprColName expr
+      pure (if negated then Not (IsTrue col) else IsTrue col)
+    FalseAExprReversableOp -> do
+      col <- extractAExprColName expr
+      pure (if negated then Not (IsFalse col) else IsFalse col)
     InAExprReversableOp (ExprListInExpr exprs) -> do
       col  <- extractAExprColName expr
       lits <- mapM extractAExprLiteral (toList exprs)
@@ -287,15 +296,15 @@ extractPredicate (SymbolicBinOpAExpr lhs op@(MathSymbolicExprBinOp _) (OrAExpr o
   p1 <- extractPredicate (SymbolicBinOpAExpr lhs op orLhs)
   p2 <- extractPredicate orRhs
   pure (Or p1 p2)
--- col op col  or  col op literal
+-- col op col  or  col op literal  (col may be cast: col::type)
 extractPredicate (SymbolicBinOpAExpr lhs (MathSymbolicExprBinOp mathOp) rhs) = do
   compOp <- parseMathOp mathOp
-  case (lhs, rhs) of
-    (CExprAExpr (ColumnrefCExpr lCr), CExprAExpr (ColumnrefCExpr rCr)) ->
-      pure (ColCmpCol (columnrefToText lCr) compOp (columnrefToText rCr))
-    (CExprAExpr (ColumnrefCExpr cr), _) -> do
+  case (extractAExprColName lhs, extractAExprColName rhs) of
+    (Right lCol, Right rCol) ->
+      pure (ColCmpCol lCol compOp rCol)
+    (Right lCol, Left _) -> do
       lit <- extractAExprLiteral rhs
-      pure (ColOp (columnrefToText cr) compOp lit)
+      pure (ColOp lCol compOp lit)
     _ ->
       Left (UnsupportedSyntax ("unsupported predicate lhs: " <> T.pack (show lhs)))
 extractPredicate expr =
@@ -303,6 +312,7 @@ extractPredicate expr =
 
 extractAExprColName :: AExpr -> Either QueryError ColumnName
 extractAExprColName (CExprAExpr (ColumnrefCExpr cr)) = Right (columnrefToText cr)
+extractAExprColName (TypecastAExpr expr _)            = extractAExprColName expr
 extractAExprColName expr =
   Left (UnsupportedSyntax ("expected column reference, got: " <> T.pack (show expr)))
 

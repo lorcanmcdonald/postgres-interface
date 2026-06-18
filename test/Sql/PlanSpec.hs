@@ -32,6 +32,12 @@ tests = testGroup "Sql.Plan"
     , testCase "SELECT * FROM t GROUP BY col"        testGroupBy
     , testCase "WHERE a AND b"                       testWhereAnd
     , testCase "table name extracted correctly"      testTableName
+    , testCase "WHERE active IS TRUE"               testIsTrue
+    , testCase "WHERE active IS FALSE"              testIsFalse
+    , testCase "WHERE active IS NOT TRUE"           testIsNotTrue
+    , testCase "WHERE active IS NOT FALSE"          testIsNotFalse
+    , testCase "WHERE col::text LIKE pattern"       testTypecastLike
+    , testCase "WHERE col::int = n"                 testTypecastEq
     ]
   ]
 
@@ -148,3 +154,33 @@ testTableName :: Assertion
 testTableName = do
   p <- runPlan "SELECT * FROM my_table"
   qpSources p @?= [TableRef "my_table" Nothing]
+
+testIsTrue :: Assertion
+testIsTrue = do
+  p <- runPlan "SELECT * FROM t WHERE active IS TRUE"
+  qpPredicates p @?= [IsTrue "active"]
+
+testIsFalse :: Assertion
+testIsFalse = do
+  p <- runPlan "SELECT * FROM t WHERE active IS FALSE"
+  qpPredicates p @?= [IsFalse "active"]
+
+testIsNotTrue :: Assertion
+testIsNotTrue = do
+  p <- runPlan "SELECT * FROM t WHERE active IS NOT TRUE"
+  qpPredicates p @?= [Not (IsTrue "active")]
+
+testIsNotFalse :: Assertion
+testIsNotFalse = do
+  p <- runPlan "SELECT * FROM t WHERE active IS NOT FALSE"
+  qpPredicates p @?= [Not (IsFalse "active")]
+
+testTypecastLike :: Assertion
+testTypecastLike = do
+  p <- runPlan "SELECT * FROM t WHERE name::text LIKE '%foo%'"
+  qpPredicates p @?= [Like "name" "%foo%"]
+
+testTypecastEq :: Assertion
+testTypecastEq = do
+  p <- runPlan "SELECT * FROM t WHERE amount::int = 5"
+  qpPredicates p @?= [ColOp "amount" Eq (LitNum 5)]
