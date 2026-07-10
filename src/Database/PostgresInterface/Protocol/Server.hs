@@ -15,7 +15,7 @@ import Database.PostgresInterface.Protocol.Decoder (decodeFrontendMessage, decod
 import Database.PostgresInterface.Protocol.Encoder (encodeBackendMessage)
 import Database.PostgresInterface.Protocol.Messages
 import Database.PostgresInterface.Sql.Parse (parseSql)
-import Database.PostgresInterface.Sql.Plan (QueryError (..), QueryPlan (..), toQueryPlan)
+import Database.PostgresInterface.Sql.Plan (QueryError (..), toQueryPlan)
 import Database.PostgresInterface.Table (AnyTable, executeQuery, describeQuery)
 import Data.Text (Text)
 import Data.Text qualified as T
