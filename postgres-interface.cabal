@@ -26,6 +26,7 @@ library
     Database.PostgresInterface.Protocol.Catalog
     Database.PostgresInterface.Sql.Parse
     Database.PostgresInterface.Sql.Plan
+    Database.PostgresInterface.Sql.PredicateEval
     Database.PostgresInterface.Queryable
     Database.PostgresInterface.Queryable.Generic
     Database.PostgresInterface.Table
@@ -70,6 +71,7 @@ test-suite postgres-interface-test
     Protocol.MessagesSpec
     Protocol.IntegrationSpec
     Sql.PlanSpec
+    Sql.PredicateEvalSpec
     Sql.SelectSupportSpec
     QueryableSpec
     EndToEndSpec

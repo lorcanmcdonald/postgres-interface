@@ -4,6 +4,7 @@ import Test.Tasty
 import Protocol.MessagesSpec qualified
 import Protocol.IntegrationSpec qualified
 import Sql.PlanSpec qualified
+import Sql.PredicateEvalSpec qualified
 import Sql.SelectSupportSpec qualified
 import QueryableSpec qualified
 import EndToEndSpec qualified
@@ -15,6 +16,7 @@ main = defaultMain $ testGroup "postgres-interface"
   [ Protocol.MessagesSpec.tests
   , Protocol.IntegrationSpec.tests
   , Sql.PlanSpec.tests
+  , Sql.PredicateEvalSpec.tests
   , Sql.SelectSupportSpec.tests
   , QueryableSpec.tests
   , EndToEndSpec.tests
