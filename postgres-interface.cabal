@@ -70,6 +70,7 @@ test-suite postgres-interface-test
   other-modules:
     Protocol.MessagesSpec
     Protocol.IntegrationSpec
+    Sql.ParseSpec
     Sql.PlanSpec
     Sql.PredicateEvalSpec
     Sql.SelectSupportSpec

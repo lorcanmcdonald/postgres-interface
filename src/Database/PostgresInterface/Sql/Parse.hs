@@ -2,18 +2,19 @@
 
 module Database.PostgresInterface.Sql.Parse
   ( parseSql
-  , SqlAst
   ) where
 
 import Data.Text (Text)
-import PostgresqlSyntax.Ast (PreparableStmt)
+import Data.Text qualified as T
+import Database.PostgresInterface.Sql.Plan (QueryError (..))
+import PostgresqlSyntax.Ast (PreparableStmt (..), SelectStmt)
 import PostgresqlSyntax.Parsing (preparableStmt, run)
 
--- | Re-export the postgresql-syntax AST type under our own alias
-type SqlAst = PreparableStmt
-
--- | Parse a SQL string into an AST. Accepts any valid PostgreSQL statement;
--- unsupported statement types (INSERT, UPDATE, DELETE) are rejected later
--- by 'toQueryPlan' with a "not implemented" error rather than a parse error.
-parseSql :: Text -> Either String SqlAst
-parseSql sql = run preparableStmt sql
+-- | Parse a SQL string into a SelectStmt, or fail with a QueryError.
+-- Non-SELECT statements (INSERT, UPDATE, DELETE) are rejected here rather
+-- than later in planning, so callers only ever receive a narrowed SELECT AST.
+parseSql :: Text -> Either QueryError SelectStmt
+parseSql sql = case run preparableStmt sql of
+  Left err                       -> Left (UnsupportedSyntax (T.pack err))
+  Right (SelectPreparableStmt s) -> Right s
+  Right _                        -> Left (UnsupportedOperation "only SELECT statements are supported")

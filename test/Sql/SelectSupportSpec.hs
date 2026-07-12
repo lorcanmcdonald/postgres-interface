@@ -90,42 +90,27 @@ tests = testGroup "Sql.SelectSupport"
     , testCase "arithmetic with alias"    $ assertSupported  "SELECT amount * 2 AS doubled FROM t"
     ]
 
-  -- DML statements parse successfully but are rejected with UnsupportedOperation
-  -- (SQLSTATE 0A000) rather than a syntax error.
-  , testGroup "not implemented: DML statements"
-    [ testCase "INSERT"  $ assertNotImplemented "INSERT INTO t VALUES (1)"
-    , testCase "UPDATE"  $ assertNotImplemented "UPDATE t SET x = 1 WHERE id = 1"
-    , testCase "DELETE"  $ assertNotImplemented "DELETE FROM t WHERE id = 1"
+  -- DML statements are rejected at parse time (SQLSTATE 0A000).
+  , testGroup "not supported: DML statements"
+    [ testCase "INSERT"  $ assertUnsupported "INSERT INTO t VALUES (1)"
+    , testCase "UPDATE"  $ assertUnsupported "UPDATE t SET x = 1 WHERE id = 1"
+    , testCase "DELETE"  $ assertUnsupported "DELETE FROM t WHERE id = 1"
     ]
   ]
 
 -- Helpers ---------------------------------------------------------------------
 
 runPlan :: Text -> IO QueryPlan
-runPlan sql = case parseSql sql of
-  Left err  -> assertFailure ("parse error: " <> err) >> undefined
-  Right ast -> case toQueryPlan ast of
-    Left err -> assertFailure ("plan error: " <> show err) >> undefined
-    Right p  -> pure p
+runPlan sql = case parseSql sql >>= toQueryPlan of
+  Left err -> assertFailure ("error: " <> show err) >> undefined
+  Right p  -> pure p
 
 assertSupported :: Text -> Assertion
-assertSupported sql = case parseSql sql of
-  Left err  -> assertFailure ("parse error: " <> err)
-  Right ast -> case toQueryPlan ast of
-    Left err -> assertFailure ("expected supported, got: " <> show err)
-    Right _  -> pure ()
+assertSupported sql = case parseSql sql >>= toQueryPlan of
+  Left err -> assertFailure ("expected supported, got: " <> show err)
+  Right _  -> pure ()
 
 assertUnsupported :: Text -> Assertion
-assertUnsupported sql = case parseSql sql of
-  Left _    -> pure ()   -- parse failure also counts as "not supported"
-  Right ast -> case toQueryPlan ast of
-    Left _  -> pure ()
-    Right _ -> assertFailure "expected unsupported, but plan succeeded"
-
-assertNotImplemented :: Text -> Assertion
-assertNotImplemented sql = case parseSql sql of
-  Left err  -> assertFailure ("expected parse to succeed, got: " <> err)
-  Right ast -> case toQueryPlan ast of
-    Left (UnsupportedOperation _) -> pure ()
-    Left err  -> assertFailure ("expected UnsupportedOperation, got: " <> show err)
-    Right _   -> assertFailure "expected plan to fail with UnsupportedOperation"
+assertUnsupported sql = case parseSql sql >>= toQueryPlan of
+  Left _  -> pure ()
+  Right _ -> assertFailure "expected unsupported, but plan succeeded"

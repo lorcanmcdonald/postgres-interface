@@ -19,7 +19,6 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (Day, LocalTime (..), UTCTime (..))
 import Data.Time.Format.ISO8601 (iso8601ParseM)
-import Database.PostgresInterface.Sql.Parse (SqlAst)
 import PostgresqlSyntax.Ast
 
 type ColumnName = Text
@@ -86,13 +85,9 @@ data QueryError
   | InternalError        Text
   deriving (Eq, Show)
 
--- | Convert a parsed SQL AST into a QueryPlan, or fail with a QueryError.
-toQueryPlan :: SqlAst -> Either QueryError QueryPlan
-toQueryPlan (SelectPreparableStmt sel) = toQueryPlanSelectStmt sel
-toQueryPlan (InsertPreparableStmt _)   = Left (UnsupportedOperation "INSERT is not supported")
-toQueryPlan (UpdatePreparableStmt _)   = Left (UnsupportedOperation "UPDATE is not supported")
-toQueryPlan (DeletePreparableStmt _)   = Left (UnsupportedOperation "DELETE is not supported")
-toQueryPlan (CallPreparableStmt _)     = Left (UnsupportedOperation "CALL is not supported")
+-- | Convert a parsed SELECT statement into a QueryPlan, or fail with a QueryError.
+toQueryPlan :: SelectStmt -> Either QueryError QueryPlan
+toQueryPlan = toQueryPlanSelectStmt
 
 -- SelectStmt = Either SelectNoParens SelectWithParens
 toQueryPlanSelectStmt :: SelectStmt -> Either QueryError QueryPlan

@@ -160,36 +160,28 @@ messageLoop' tables sock ext headerBytes = do
 -- Returns Nothing if the query can't be planned or the table isn't registered.
 describeSQL :: [AnyTable] -> Text -> Maybe [FieldInfo]
 describeSQL tables sql =
-  case parseSql sql of
-    Left  _   -> Nothing
-    Right ast ->
-      case toQueryPlan ast of
-        Left  _    -> Nothing
-        Right plan ->
-          case describeQuery tables plan of
-            Left  _      -> Nothing
-            Right fields -> Just fields
+  case parseSql sql >>= toQueryPlan of
+    Left  _    -> Nothing
+    Right plan ->
+      case describeQuery tables plan of
+        Left  _      -> Nothing
+        Right fields -> Just fields
 
 -- | Execute a SQL query for the extended protocol Execute step.
 -- Unlike handleUserQuery, this does NOT send RowDescription — the client
 -- already received it from the preceding Describe step.
 handleExecuteQuery :: [AnyTable] -> Socket -> Text -> IO ()
 handleExecuteQuery tables sock sql =
-  case parseSql sql of
-    Left _ ->
-      sendError sock (PgError SeverityError "42601" ("syntax error: " <> sql))
-    Right ast ->
-      case toQueryPlan ast of
-        Left err ->
-          sendError sock (queryErrorToPgError err)
-        Right plan -> do
-          result <- executeQuery tables plan
-          case result of
-            Left err   -> sendError sock (queryErrorToPgError err)
-            Right msgs ->
-              -- Strip RowDescription: Execute step must not repeat it
-              mapM_ (sendAll sock . encodeBackendMessage)
-                    (stripRowDescription msgs)
+  case parseSql sql >>= toQueryPlan of
+    Left err -> sendError sock (queryErrorToPgError err)
+    Right plan -> do
+      result <- executeQuery tables plan
+      case result of
+        Left err   -> sendError sock (queryErrorToPgError err)
+        Right msgs ->
+          -- Strip RowDescription: Execute step must not repeat it
+          mapM_ (sendAll sock . encodeBackendMessage)
+                (stripRowDescription msgs)
 
 -- | Remove any RowDescription messages from a list of backend messages.
 -- Used in the Execute path: per the protocol, RowDescription is sent by
@@ -202,18 +194,13 @@ stripRowDescription = filter notRowDescription
 
 handleUserQuery :: [AnyTable] -> Socket -> Text -> IO ()
 handleUserQuery tables sock sql =
-  case parseSql sql of
-    Left _ ->
-      sendError sock (PgError SeverityError "42601" ("syntax error: " <> sql))
-    Right ast ->
-      case toQueryPlan ast of
-        Left err ->
-          sendError sock (queryErrorToPgError err)
-        Right plan -> do
-          result <- executeQuery tables plan
-          case result of
-            Left err   -> sendError sock (queryErrorToPgError err)
-            Right msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
+  case parseSql sql >>= toQueryPlan of
+    Left err -> sendError sock (queryErrorToPgError err)
+    Right plan -> do
+      result <- executeQuery tables plan
+      case result of
+        Left err   -> sendError sock (queryErrorToPgError err)
+        Right msgs -> mapM_ (sendAll sock . encodeBackendMessage) msgs
 
 queryErrorToPgError :: QueryError -> PgError
 queryErrorToPgError (UnsupportedOperation msg) = PgError SeverityError "0A000" msg

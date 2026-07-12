@@ -13,8 +13,6 @@ tests = testGroup "Sql.Plan"
   [ testGroup "parseSql"
     [ testCase "parses simple SELECT *"       testParseSelectStar
     , testCase "parses SELECT with columns"   testParseSelectCols
-    , testCase "parses INSERT (plan rejects)" testParseInsert
-    , testCase "parses UPDATE (plan rejects)" testParseUpdate
     ]
   , testGroup "parseSql reserved-word identifiers"
     [ testCase "'date' unquoted in SELECT list"   testDateInSelect
@@ -44,30 +42,28 @@ tests = testGroup "Sql.Plan"
 -- Helpers ---------------------------------------------------------------------
 
 runPlan :: Text -> IO QueryPlan
-runPlan sql = case parseSql sql of
-  Left err  -> assertFailure ("parse error: " <> err) >> undefined
-  Right ast -> case toQueryPlan ast of
-    Left err -> assertFailure ("plan error: " <> show err) >> undefined
-    Right p  -> pure p
+runPlan sql = case parseSql sql >>= toQueryPlan of
+  Left err -> assertFailure ("error: " <> show err) >> undefined
+  Right p  -> pure p
 
 -- reserved-word identifier tests ----------------------------------------------
 
 testDateInSelect :: Assertion
 testDateInSelect =
   case parseSql "SELECT date, amount FROM line_items" of
-    Left err -> assertFailure ("parse failed: " <> err)
+    Left err -> assertFailure ("parse failed: " <> show err)
     Right _  -> pure ()
 
 testDateInWhere :: Assertion
 testDateInWhere =
   case parseSql "SELECT * FROM line_items WHERE date > '2026-01-01'" of
-    Left err -> assertFailure ("parse failed: " <> err)
+    Left err -> assertFailure ("parse failed: " <> show err)
     Right _  -> pure ()
 
 testDateInOrderBy :: Assertion
 testDateInOrderBy =
   case parseSql "SELECT * FROM line_items ORDER BY date DESC" of
-    Left err -> assertFailure ("parse failed: " <> err)
+    Left err -> assertFailure ("parse failed: " <> show err)
     Right _  -> pure ()
 
 -- parseSql tests --------------------------------------------------------------
@@ -75,32 +71,14 @@ testDateInOrderBy =
 testParseSelectStar :: Assertion
 testParseSelectStar =
   case parseSql "SELECT * FROM line_items" of
-    Left err -> assertFailure ("parse failed: " <> err)
+    Left err -> assertFailure ("parse failed: " <> show err)
     Right _  -> pure ()
 
 testParseSelectCols :: Assertion
 testParseSelectCols =
   case parseSql "SELECT category, amount FROM line_items" of
-    Left err -> assertFailure ("parse failed: " <> err)
+    Left err -> assertFailure ("parse failed: " <> show err)
     Right _  -> pure ()
-
-testParseInsert :: Assertion
-testParseInsert =
-  case parseSql "INSERT INTO t VALUES (1)" of
-    Left err -> assertFailure ("expected parse to succeed, got: " <> err)
-    Right ast -> case toQueryPlan ast of
-      Left (UnsupportedOperation _) -> pure ()
-      Left err -> assertFailure ("expected UnsupportedOperation, got: " <> show err)
-      Right _  -> assertFailure "expected plan to fail"
-
-testParseUpdate :: Assertion
-testParseUpdate =
-  case parseSql "UPDATE t SET x = 1 WHERE id = 1" of
-    Left err -> assertFailure ("expected parse to succeed, got: " <> err)
-    Right ast -> case toQueryPlan ast of
-      Left (UnsupportedOperation _) -> pure ()
-      Left err -> assertFailure ("expected UnsupportedOperation, got: " <> show err)
-      Right _  -> assertFailure "expected plan to fail"
 
 -- toQueryPlan tests -----------------------------------------------------------
 

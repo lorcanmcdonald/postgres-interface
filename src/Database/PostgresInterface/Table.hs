@@ -310,7 +310,7 @@ buildMessages sch valss =
 -- type mismatch).
 executeQuery :: [AnyTable] -> QueryPlan -> IO (Either QueryError [BackendMessage])
 executeQuery tables plan =
-  fmap (fmap (uncurry buildMessages)) (runPlan tables plan)
+  (uncurry buildMessages <$>) <$> runPlan tables plan
 
 -- | Describe the output schema of any QueryPlan.
 describeQuery :: [AnyTable] -> QueryPlan -> Either QueryError [FieldInfo]
