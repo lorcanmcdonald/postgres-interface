@@ -36,6 +36,7 @@ tests = testGroup "Sql.Plan"
     , testCase "WHERE active IS NOT FALSE"          testIsNotFalse
     , testCase "WHERE col::text LIKE pattern"       testTypecastLike
     , testCase "WHERE col::int = n"                 testTypecastEq
+    , testCase "WHERE col = string with apostrophe" testWhereEqApostrophe
     ]
   ]
 
@@ -162,3 +163,8 @@ testTypecastEq :: Assertion
 testTypecastEq = do
   p <- runPlan "SELECT * FROM t WHERE amount::int = 5"
   qpPredicates p @?= [ColOp "amount" Eq (LitNum 5)]
+
+testWhereEqApostrophe :: Assertion
+testWhereEqApostrophe = do
+  p <- runPlan "SELECT * FROM t WHERE account = 'Lorcan''s Current Account'"
+  qpPredicates p @?= [ColOp "account" Eq (LitText "Lorcan's Current Account")]
